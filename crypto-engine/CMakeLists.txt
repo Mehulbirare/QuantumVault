@@ -14,6 +14,10 @@ add_subdirectory(liboqs)
 # Main build target for Day 4 Keypair Generator
 add_executable(kyber_keypair src/kyber_keypair.c)
 target_link_libraries(kyber_keypair PRIVATE oqs)
-
-# Include directories for oqs headers
 target_include_directories(kyber_keypair PRIVATE liboqs/src/common)
+
+# Main build target for Day 5 Encrypt/Decrypt Round-Trip
+add_executable(kyber_roundtrip src/kyber_roundtrip.c)
+target_link_libraries(kyber_roundtrip PRIVATE oqs)
+target_include_directories(kyber_roundtrip PRIVATE liboqs/src/common)
+
