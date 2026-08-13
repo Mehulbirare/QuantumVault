@@ -75,19 +75,31 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
 ```
 
-### Building `liboqs`
-Clone and build the Open Quantum Safe library:
+### Building `liboqs` (Pinned Version: 0.10.0)
+The repository includes `liboqs` (version `0.10.0`) as a git submodule under `crypto-engine/liboqs`.
 
+To clone the repository with submodules:
 ```bash
-git clone --depth 1 https://github.com/open-quantum-safe/liboqs.git
-cd liboqs
-mkdir build && cd build
+git clone --recurse-submodules https://github.com/Mehulbirare/QuantumVault.git
+cd QuantumVault
+```
+
+Or initialize submodules if already cloned:
+```bash
+git submodule update --init --recursive
+```
+
+To build and install the pinned `liboqs` library:
+```bash
+cd crypto-engine/liboqs
+mkdir -p build && cd build
 cmake -GNinja -DOQS_USE_OPENSSL=OFF ..
 ninja
 sudo ninja install
 ```
 
 ---
+
 ## 💻 Getting Started
 
 ### 1. Clone the Repository
