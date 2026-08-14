@@ -1,0 +1,8 @@
+[package]
+name = "quantumvault-fuse-week1"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fuser = "0.16"
+libc = "0.2"
