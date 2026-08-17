@@ -21,3 +21,9 @@ add_executable(kyber_roundtrip src/kyber_roundtrip.c)
 target_link_libraries(kyber_roundtrip PRIVATE oqs)
 target_include_directories(kyber_roundtrip PRIVATE liboqs/src/common)
 
+# Static library target for FFI wrapper
+add_library(quantum_crypto STATIC src/quantum_crypto.c)
+target_link_libraries(quantum_crypto PRIVATE oqs)
+target_include_directories(quantum_crypto PUBLIC src liboqs/src/common)
+
+

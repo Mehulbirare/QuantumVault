@@ -1,3 +1,5 @@
+pub mod crypto;
+
 use std::env;
 use std::ffi::OsStr;
 use std::process;
