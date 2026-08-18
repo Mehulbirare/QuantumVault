@@ -1,3 +1,7 @@
+unsafe extern "C" {
+    fn quantumvault_ffi_test() -> i32;
+}
+
 use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
     Request,
@@ -143,16 +147,19 @@ fn hello_attr() -> FileAttr {
 fn main() {
     let mountpoint = std::env::args()
         .nth(1)
-        .expect("Usage: quantumvault-fuse-week1 <mountpoint>");
+        .expect("Usage: quantumvault-fuse <mountpoint>");
 
-    println!("QuantumVault Week 1 FUSE filesystem");
+    println!("QuantumVault filesystem");
     println!("Mounting at: {}", mountpoint);
+
+    let ffi_result = unsafe { quantumvault_ffi_test() };
+    println!("[Rust] FFI test returned: {}", ffi_result);
 
     fuser::mount2(
         QuantumVaultFS,
         mountpoint,
         &[
-            fuser::MountOption::FSName("quantumvault-week1".to_string()),
+            fuser::MountOption::FSName("quantumvault".to_string()),
             fuser::MountOption::AutoUnmount,
         ],
     )
