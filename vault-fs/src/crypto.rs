@@ -179,3 +179,67 @@ pub fn decrypt(
     
     Ok(plaintext)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_init_and_keygen() {
+        init();
+        let keys = generate_keypair().expect("Keypair generation failed");
+        
+        let expected_pub_len = unsafe { qv_kyber_public_key_bytes() };
+        let expected_sec_len = unsafe { qv_kyber_secret_key_bytes() };
+        
+        assert_eq!(keys.public_key.len(), expected_pub_len);
+        assert_eq!(keys.secret_key.len(), expected_sec_len);
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_roundtrip() {
+        let keys = generate_keypair().expect("Keypair generation failed");
+        
+        let test_cases = vec![
+            b"".as_slice(),
+            b"Hello Post-Quantum FFI!".as_slice(),
+            b"A".repeat(1000).as_slice(),
+        ];
+        
+        for plaintext in test_cases {
+            let encrypted = encrypt(plaintext, &keys.public_key).expect("Encryption failed");
+            let decrypted = decrypt(&encrypted.ciphertext, &encrypted.kem_ciphertext, &keys.secret_key)
+                .expect("Decryption failed");
+                
+            assert_eq!(plaintext, decrypted.as_slice());
+        }
+    }
+
+    #[test]
+    fn test_invalid_lengths() {
+        let keys = generate_keypair().expect("Keypair generation failed");
+        let msg = b"Testing length constraints";
+        
+        // 1. Invalid public key length
+        let mut bad_pub_key = keys.public_key.clone();
+        bad_pub_key.pop();
+        let res = encrypt(msg, &bad_pub_key);
+        assert_eq!(res.err(), Some(CryptoError::InvalidKeyLength));
+        
+        // Encrypt properly to get valid ciphertext and KEM ciphertext
+        let encrypted = encrypt(msg, &keys.public_key).expect("Encryption failed");
+        
+        // 2. Invalid secret key length
+        let mut bad_sec_key = keys.secret_key.clone();
+        bad_sec_key.push(0);
+        let res = decrypt(&encrypted.ciphertext, &encrypted.kem_ciphertext, &bad_sec_key);
+        assert_eq!(res.err(), Some(CryptoError::InvalidKeyLength));
+        
+        // 3. Invalid KEM ciphertext length
+        let mut bad_kem_ciphertext = encrypted.kem_ciphertext.clone();
+        bad_kem_ciphertext.pop();
+        let res = decrypt(&encrypted.ciphertext, &bad_kem_ciphertext, &keys.secret_key);
+        assert_eq!(res.err(), Some(CryptoError::InvalidCiphertextLength));
+    }
+}
+
