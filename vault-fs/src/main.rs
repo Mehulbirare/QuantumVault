@@ -6,7 +6,7 @@ use std::process;
 use std::time::{Duration, UNIX_EPOCH};
 use fuser::{
     FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
-    Request,
+    ReplyWrite, Request,
 };
 use libc::ENOENT;
 
@@ -123,6 +123,27 @@ impl Filesystem for HelloFS {
         }
         reply.ok();
     }
+
+    fn write(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        data: &[u8],
+        _write_flags: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: ReplyWrite,
+    ) {
+        log::debug!(
+            "write() called for inode {}, offset {}, size {}",
+            ino,
+            offset,
+            data.len()
+        );
+        reply.written(data.len() as u32);
+    }
 }
 
 fn main() {
@@ -144,7 +165,7 @@ fn main() {
     println!("Mounting filesystem to: {}", mountpoint);
 
     let options = vec![
-        MountOption::RO,
+        MountOption::RW,
         MountOption::FSName("hello_fs".to_string()),
         MountOption::AutoUnmount,
     ];
