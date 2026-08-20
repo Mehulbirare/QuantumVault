@@ -1,77 +1,271 @@
 pub mod crypto;
 
+use std::collections::HashMap;
 use std::env;
 use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::Mutex;
 use std::time::{Duration, UNIX_EPOCH};
 use fuser::{
     FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
-    ReplyWrite, Request,
+    ReplyWrite, ReplyCreate, Request,
 };
 use libc::ENOENT;
 
 const TTL: Duration = Duration::from_secs(1);
 
-const HELLO_DIR_ATTR: FileAttr = FileAttr {
-    ino: 1,
-    size: 0,
-    blocks: 0,
-    atime: UNIX_EPOCH,
-    mtime: UNIX_EPOCH,
-    ctime: UNIX_EPOCH,
-    crtime: UNIX_EPOCH,
-    kind: FileType::Directory,
-    perm: 0o755,
-    nlink: 2,
-    uid: 501,
-    gid: 20,
-    rdev: 0,
-    blksize: 512,
-    flags: 0,
-};
+struct InodeMap {
+    next_ino: u64,
+    ino_to_path: HashMap<u64, PathBuf>,
+    path_to_ino: HashMap<PathBuf, u64>,
+}
 
-const HELLO_TXT_CONTENT: &str = "Hello World\n";
+impl InodeMap {
+    fn new() -> Self {
+        let mut map = InodeMap {
+            next_ino: 2, // 1 is root directory
+            ino_to_path: HashMap::new(),
+            path_to_ino: HashMap::new(),
+        };
+        map.ino_to_path.insert(1, PathBuf::from(""));
+        map.path_to_ino.insert(PathBuf::from(""), 1);
+        map
+    }
 
-const HELLO_TXT_ATTR: FileAttr = FileAttr {
-    ino: 2,
-    size: HELLO_TXT_CONTENT.len() as u64,
-    blocks: 1,
-    atime: UNIX_EPOCH,
-    mtime: UNIX_EPOCH,
-    ctime: UNIX_EPOCH,
-    crtime: UNIX_EPOCH,
-    kind: FileType::RegularFile,
-    perm: 0o644,
-    nlink: 1,
-    uid: 501,
-    gid: 20,
-    rdev: 0,
-    blksize: 512,
-    flags: 0,
-};
+    fn get_path(&self, ino: u64) -> Option<PathBuf> {
+        self.ino_to_path.get(&ino).cloned()
+    }
 
-struct HelloFS;
+    fn get_ino(&mut self, path: &Path) -> u64 {
+        let path_buf = path.to_path_buf();
+        if let Some(&ino) = self.path_to_ino.get(&path_buf) {
+            ino
+        } else {
+            let ino = self.next_ino;
+            self.next_ino += 1;
+            self.ino_to_path.insert(ino, path_buf.clone());
+            self.path_to_ino.insert(path_buf, ino);
+            ino
+        }
+    }
+}
 
-impl Filesystem for HelloFS {
-    fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        if parent == 1 && name == "hello.txt" {
-            reply.entry(&TTL, &HELLO_TXT_ATTR, 0);
+struct QuantumFS {
+    backend: PathBuf,
+    public_key: Vec<u8>,
+    secret_key: Vec<u8>,
+    inode_map: Mutex<InodeMap>,
+}
+
+impl QuantumFS {
+    fn new(backend: PathBuf, keys: crypto::KyberKeys) -> Self {
+        QuantumFS {
+            backend,
+            public_key: keys.public_key,
+            secret_key: keys.secret_key,
+            inode_map: Mutex::new(InodeMap::new()),
+        }
+    }
+}
+
+fn file_attr_from_metadata(ino: u64, metadata: &std::fs::Metadata) -> FileAttr {
+    let size = if metadata.is_file() {
+        let raw_size = metadata.len();
+        // Transparent size adjustment: hide the 1088-byte KEM ciphertext prefix
+        if raw_size >= 1088 {
+            raw_size - 1088
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
+    let kind = if metadata.is_dir() {
+        FileType::Directory
+    } else {
+        FileType::RegularFile
+    };
+
+    FileAttr {
+        ino,
+        size,
+        blocks: (size + 511) / 512,
+        atime: metadata.accessed().unwrap_or(UNIX_EPOCH),
+        mtime: metadata.modified().unwrap_or(UNIX_EPOCH),
+        ctime: metadata.created().unwrap_or(UNIX_EPOCH),
+        crtime: metadata.created().unwrap_or(UNIX_EPOCH),
+        kind,
+        perm: if metadata.is_dir() { 0o755 } else { 0o644 },
+        nlink: if metadata.is_dir() { 2 } else { 1 },
+        uid: 501,
+        gid: 20,
+        rdev: 0,
+        blksize: 512,
+        flags: 0,
+    }
+}
+
+impl Filesystem for QuantumFS {
+    fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
+        let parent_path = match self.inode_map.lock().unwrap().get_path(parent) {
+            Some(p) => p,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let rel_path = parent_path.join(name);
+        let full_path = self.backend.join(&rel_path);
+
+        if full_path.exists() {
+            let mut inode_map = self.inode_map.lock().unwrap();
+            let ino = inode_map.get_ino(&rel_path);
+            
+            if let Ok(metadata) = std::fs::metadata(&full_path) {
+                let attr = file_attr_from_metadata(ino, &metadata);
+                reply.entry(&TTL, &attr, 0);
+            } else {
+                reply.error(ENOENT);
+            }
         } else {
             reply.error(ENOENT);
         }
     }
 
-    fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
-        match ino {
-            1 => reply.attr(&TTL, &HELLO_DIR_ATTR),
-            2 => reply.attr(&TTL, &HELLO_TXT_ATTR),
-            _ => reply.error(ENOENT),
+    fn getattr(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyAttr) {
+        let rel_path = match self.inode_map.lock().unwrap().get_path(ino) {
+            Some(p) => p,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let full_path = self.backend.join(&rel_path);
+        if let Ok(metadata) = std::fs::metadata(&full_path) {
+            let attr = file_attr_from_metadata(ino, &metadata);
+            reply.attr(&TTL, &attr);
+        } else {
+            reply.error(ENOENT);
+        }
+    }
+
+    fn setattr(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+        size: Option<u64>,
+        _atime: Option<fuser::TimeOrNow>,
+        _mtime: Option<fuser::TimeOrNow>,
+        _ctime: Option<std::time::SystemTime>,
+        _fh: Option<u64>,
+        _crtime: Option<std::time::SystemTime>,
+        _chgtime: Option<std::time::SystemTime>,
+        _bkuptime: Option<std::time::SystemTime>,
+        _flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        let rel_path = match self.inode_map.lock().unwrap().get_path(ino) {
+            Some(p) => p,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+        let full_path = self.backend.join(&rel_path);
+
+        if !full_path.exists() {
+            reply.error(ENOENT);
+            return;
+        }
+
+        // Handle file truncation / resizing
+        if let Some(new_size) = size {
+            let new_size = new_size as usize;
+            let mut plaintext = Vec::new();
+
+            if let Ok(disk_data) = std::fs::read(&full_path) {
+                if disk_data.len() >= 1088 {
+                    let kem_ciphertext = &disk_data[0..1088];
+                    let ciphertext = &disk_data[1088..];
+                    if let Ok(decrypted) = crypto::decrypt(ciphertext, kem_ciphertext, &self.secret_key) {
+                        plaintext = decrypted;
+                    }
+                }
+            }
+            plaintext.resize(new_size, 0);
+
+            let encrypted = match crypto::encrypt(&plaintext, &self.public_key) {
+                Ok(enc) => enc,
+                Err(_) => {
+                    reply.error(libc::EIO);
+                    return;
+                }
+            };
+
+            let mut disk_buffer = Vec::with_capacity(1088 + encrypted.ciphertext.len());
+            disk_buffer.extend_from_slice(&encrypted.kem_ciphertext);
+            disk_buffer.extend_from_slice(&encrypted.ciphertext);
+
+            if std::fs::write(&full_path, disk_buffer).is_err() {
+                reply.error(libc::EIO);
+                return;
+            }
+        }
+
+        if let Ok(metadata) = std::fs::metadata(&full_path) {
+            let attr = file_attr_from_metadata(ino, &metadata);
+            reply.attr(&TTL, &attr);
+        } else {
+            reply.error(ENOENT);
+        }
+    }
+
+    fn create(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        _flags: i32,
+        reply: ReplyCreate,
+    ) {
+        let parent_path = match self.inode_map.lock().unwrap().get_path(parent) {
+            Some(p) => p,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let rel_path = parent_path.join(name);
+        let full_path = self.backend.join(&rel_path);
+
+        if std::fs::File::create(&full_path).is_ok() {
+            let mut inode_map = self.inode_map.lock().unwrap();
+            let ino = inode_map.get_ino(&rel_path);
+            
+            if let Ok(metadata) = std::fs::metadata(&full_path) {
+                let attr = file_attr_from_metadata(ino, &metadata);
+                reply.created(&TTL, &attr, 0, 0, 0);
+            } else {
+                reply.error(ENOENT);
+            }
+        } else {
+            reply.error(libc::EACCES);
         }
     }
 
     fn read(
         &mut self,
-        _req: &Request,
+        _req: &Request<'_>,
         ino: u64,
         _fh: u64,
         offset: i64,
@@ -80,48 +274,48 @@ impl Filesystem for HelloFS {
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        if ino == 2 {
-            let content_bytes = HELLO_TXT_CONTENT.as_bytes();
-            let content_len = content_bytes.len() as i64;
-            if offset < content_len {
-                let start = offset as usize;
-                let end = std::cmp::min(content_len, offset + size as i64) as usize;
-                reply.data(&content_bytes[start..end]);
-            } else {
-                reply.data(&[]);
+        let rel_path = match self.inode_map.lock().unwrap().get_path(ino) {
+            Some(p) => p,
+            None => {
+                reply.error(ENOENT);
+                return;
             }
-        } else {
-            reply.error(ENOENT);
-        }
-    }
+        };
+        let full_path = self.backend.join(&rel_path);
 
-    fn readdir(
-        &mut self,
-        _req: &Request,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
-        mut reply: ReplyDirectory,
-    ) {
-        if ino != 1 {
+        if !full_path.exists() {
             reply.error(ENOENT);
             return;
         }
 
-        let entries = vec![
-            (1, FileType::Directory, "."),
-            (1, FileType::Directory, ".."),
-            (2, FileType::RegularFile, "hello.txt"),
-        ];
-
-        for (i, entry) in entries.into_iter().enumerate().skip(offset as usize) {
-            // Number of bytes of buffer space used is returned. If the buffer is full,
-            // we stop adding and return.
-            if reply.add(entry.0, (i + 1) as i64, entry.1, entry.2) {
-                break;
+        match std::fs::read(&full_path) {
+            Ok(disk_data) => {
+                if disk_data.len() >= 1088 {
+                    let kem_ciphertext = &disk_data[0..1088];
+                    let ciphertext = &disk_data[1088..];
+                    
+                    match crypto::decrypt(ciphertext, kem_ciphertext, &self.secret_key) {
+                        Ok(plaintext) => {
+                            let plaintext_len = plaintext.len() as i64;
+                            if offset < plaintext_len {
+                                let start = offset as usize;
+                                let end = std::cmp::min(plaintext_len, offset + size as i64) as usize;
+                                reply.data(&plaintext[start..end]);
+                            } else {
+                                reply.data(&[]);
+                            }
+                        }
+                        Err(err) => {
+                            log::error!("Decryption failed during read: {:?}", err);
+                            reply.error(libc::EIO);
+                        }
+                    }
+                } else {
+                    reply.data(&[]);
+                }
             }
+            Err(_) => reply.error(libc::EIO),
         }
-        reply.ok();
     }
 
     fn write(
@@ -136,13 +330,107 @@ impl Filesystem for HelloFS {
         _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        log::debug!(
-            "write() called for inode {}, offset {}, size {}",
-            ino,
-            offset,
-            data.len()
-        );
-        reply.written(data.len() as u32);
+        let rel_path = match self.inode_map.lock().unwrap().get_path(ino) {
+            Some(p) => p,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+        let full_path = self.backend.join(&rel_path);
+
+        let mut plaintext = Vec::new();
+        if full_path.exists() {
+            if let Ok(disk_data) = std::fs::read(&full_path) {
+                if disk_data.len() >= 1088 {
+                    let kem_ciphertext = &disk_data[0..1088];
+                    let ciphertext = &disk_data[1088..];
+                    if let Ok(decrypted) = crypto::decrypt(ciphertext, kem_ciphertext, &self.secret_key) {
+                        plaintext = decrypted;
+                    }
+                }
+            }
+        }
+
+        let offset = offset as usize;
+        if plaintext.len() < offset {
+            plaintext.resize(offset, 0);
+        }
+
+        let end = offset + data.len();
+        if plaintext.len() < end {
+            plaintext.resize(end, 0);
+        }
+        plaintext[offset..end].copy_from_slice(data);
+
+        let encrypted = match crypto::encrypt(&plaintext, &self.public_key) {
+            Ok(enc) => enc,
+            Err(err) => {
+                log::error!("Encryption failed during write: {:?}", err);
+                reply.error(libc::EIO);
+                return;
+            }
+        };
+
+        let mut disk_buffer = Vec::with_capacity(1088 + encrypted.ciphertext.len());
+        disk_buffer.extend_from_slice(&encrypted.kem_ciphertext);
+        disk_buffer.extend_from_slice(&encrypted.ciphertext);
+
+        if std::fs::write(&full_path, disk_buffer).is_ok() {
+            reply.written(data.len() as u32);
+        } else {
+            reply.error(libc::EIO);
+        }
+    }
+
+    fn readdir(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        mut reply: ReplyDirectory,
+    ) {
+        let parent_path = match self.inode_map.lock().unwrap().get_path(ino) {
+            Some(p) => p,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        let full_path = self.backend.join(&parent_path);
+        
+        let mut entries = vec![
+            (ino, FileType::Directory, ".".to_string()),
+            (1, FileType::Directory, "..".to_string()),
+        ];
+
+        if let Ok(read_dir) = std::fs::read_dir(&full_path) {
+            let mut inode_map = self.inode_map.lock().unwrap();
+            for entry_res in read_dir {
+                if let Ok(entry) = entry_res {
+                    let file_name = entry.file_name().to_string_lossy().into_owned();
+                    let rel_entry_path = parent_path.join(&file_name);
+                    
+                    let file_type = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        FileType::Directory
+                    } else {
+                        FileType::RegularFile
+                    };
+                    
+                    let child_ino = inode_map.get_ino(&rel_entry_path);
+                    entries.push((child_ino, file_type, file_name));
+                }
+            }
+        }
+
+        for (i, entry) in entries.into_iter().enumerate().skip(offset as usize) {
+            if reply.add(entry.0, (i + 1) as i64, entry.1, &entry.2) {
+                break;
+            }
+        }
+        reply.ok();
     }
 }
 
@@ -151,28 +439,43 @@ fn main() {
     env_logger::init();
 
     println!("=========================================");
-    println!("QuantumVault FUSE Filesystem (Hello World)");
+    println!("QuantumVault FUSE Filesystem");
     println!("=========================================");
 
-    // Parse arguments (expect mount point)
+    // Parse arguments (expect mount point and backend store directory)
     let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        eprintln!("Usage: {} <MOUNT_POINT>", args[0]);
+    if args.len() < 3 {
+        eprintln!("Usage: {} <MOUNT_POINT> <BACKEND_DIR>", args[0]);
         process::exit(1);
     }
 
     let mountpoint = &args[1];
+    let backend_dir = &args[2];
     println!("Mounting filesystem to: {}", mountpoint);
+    println!("Backing store directory: {}", backend_dir);
+
+    // Ensure backend store exists
+    let backend_path = PathBuf::from(backend_dir);
+    if !backend_path.exists() {
+        std::fs::create_dir_all(&backend_path).expect("Failed to create backing store directory");
+    }
+
+    // Generate CRYSTALS-Kyber-768 session keys
+    println!("Generating post-quantum session keypair...");
+    let keys = crypto::generate_keypair().expect("Failed to generate CRYSTALS-Kyber-768 session keys");
+    println!("Session keypair generated successfully.");
 
     let options = vec![
         MountOption::RW,
-        MountOption::FSName("hello_fs".to_string()),
+        MountOption::FSName("quantum_fs".to_string()),
         MountOption::AutoUnmount,
     ];
 
+    let quantum_fs = QuantumFS::new(backend_path, keys);
+
     #[cfg(target_os = "linux")]
     {
-        if let Err(err) = fuser::mount2(HelloFS, mountpoint, &options) {
+        if let Err(err) = fuser::mount2(quantum_fs, mountpoint, &options) {
             eprintln!("Error mounting filesystem: {:?}", err);
             process::exit(1);
         }
@@ -180,7 +483,8 @@ fn main() {
 
     #[cfg(not(target_os = "linux"))]
     {
+        let _ = quantum_fs;
         eprintln!("Warning: FUSE mounts are only supported on Linux targets. Active OS is not Linux.");
-        eprintln!("Scaffolding compiled successfully! To test actual mounting, run on WSL2 or native Linux.");
+        eprintln!("QuantumFS compiled successfully! To test actual mounting, run on WSL2 or native Linux.");
     }
 }
