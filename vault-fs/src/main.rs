@@ -185,25 +185,54 @@ impl Filesystem for QuantumFS {
             return;
         }
 
+        if full_path.is_dir() {
+            if size.is_some() {
+                reply.error(libc::EISDIR);
+                return;
+            }
+        }
+
         // Handle file truncation / resizing
         if let Some(new_size) = size {
             let new_size = new_size as usize;
             let mut plaintext = Vec::new();
 
-            if let Ok(disk_data) = std::fs::read(&full_path) {
-                if disk_data.len() >= 1088 {
-                    let kem_ciphertext = &disk_data[0..1088];
-                    let ciphertext = &disk_data[1088..];
-                    if let Ok(decrypted) = crypto::decrypt(ciphertext, kem_ciphertext, &self.secret_key) {
-                        plaintext = decrypted;
+            if full_path.exists() {
+                match std::fs::read(&full_path) {
+                    Ok(disk_data) => {
+                        if disk_data.len() >= 1088 {
+                            let kem_ciphertext = &disk_data[0..1088];
+                            let ciphertext = &disk_data[1088..];
+                            match crypto::decrypt(ciphertext, kem_ciphertext, &self.secret_key) {
+                                Ok(decrypted) => {
+                                    plaintext = decrypted;
+                                }
+                                Err(err) => {
+                                    log::error!("Decryption failed during setattr resize: {:?}", err);
+                                    reply.error(libc::EIO);
+                                    return;
+                                }
+                            }
+                        } else if disk_data.len() > 0 {
+                            log::error!("Backing file is corrupted during setattr (size {} < 1088)", disk_data.len());
+                            reply.error(libc::EIO);
+                            return;
+                        }
+                    }
+                    Err(err) => {
+                        log::error!("Failed to read backing file during setattr: {:?}", err);
+                        reply.error(libc::EIO);
+                        return;
                     }
                 }
             }
+
             plaintext.resize(new_size, 0);
 
             let encrypted = match crypto::encrypt(&plaintext, &self.public_key) {
                 Ok(enc) => enc,
-                Err(_) => {
+                Err(err) => {
+                    log::error!("Encryption failed during setattr resize: {:?}", err);
                     reply.error(libc::EIO);
                     return;
                 }
@@ -213,7 +242,8 @@ impl Filesystem for QuantumFS {
             disk_buffer.extend_from_slice(&encrypted.kem_ciphertext);
             disk_buffer.extend_from_slice(&encrypted.ciphertext);
 
-            if std::fs::write(&full_path, disk_buffer).is_err() {
+            if let Err(err) = std::fs::write(&full_path, disk_buffer) {
+                log::error!("Failed to write truncated file to backing store: {:?}", err);
                 reply.error(libc::EIO);
                 return;
             }
@@ -339,15 +369,38 @@ impl Filesystem for QuantumFS {
         };
         let full_path = self.backend.join(&rel_path);
 
+        if full_path.is_dir() {
+            reply.error(libc::EISDIR);
+            return;
+        }
+
         let mut plaintext = Vec::new();
         if full_path.exists() {
-            if let Ok(disk_data) = std::fs::read(&full_path) {
-                if disk_data.len() >= 1088 {
-                    let kem_ciphertext = &disk_data[0..1088];
-                    let ciphertext = &disk_data[1088..];
-                    if let Ok(decrypted) = crypto::decrypt(ciphertext, kem_ciphertext, &self.secret_key) {
-                        plaintext = decrypted;
+            match std::fs::read(&full_path) {
+                Ok(disk_data) => {
+                    if disk_data.len() >= 1088 {
+                        let kem_ciphertext = &disk_data[0..1088];
+                        let ciphertext = &disk_data[1088..];
+                        match crypto::decrypt(ciphertext, kem_ciphertext, &self.secret_key) {
+                            Ok(decrypted) => {
+                                plaintext = decrypted;
+                            }
+                            Err(err) => {
+                                log::error!("Decryption failed during write: {:?}", err);
+                                reply.error(libc::EIO);
+                                return;
+                            }
+                        }
+                    } else if disk_data.len() > 0 {
+                        log::error!("Backing file is corrupted (size {} < 1088)", disk_data.len());
+                        reply.error(libc::EIO);
+                        return;
                     }
+                }
+                Err(err) => {
+                    log::error!("Failed to read backing file: {:?}", err);
+                    reply.error(libc::EIO);
+                    return;
                 }
             }
         }
@@ -376,10 +429,11 @@ impl Filesystem for QuantumFS {
         disk_buffer.extend_from_slice(&encrypted.kem_ciphertext);
         disk_buffer.extend_from_slice(&encrypted.ciphertext);
 
-        if std::fs::write(&full_path, disk_buffer).is_ok() {
-            reply.written(data.len() as u32);
-        } else {
+        if let Err(err) = std::fs::write(&full_path, disk_buffer) {
+            log::error!("Failed to write encrypted file to backing store: {:?}", err);
             reply.error(libc::EIO);
+        } else {
+            reply.written(data.len() as u32);
         }
     }
 
