@@ -26,4 +26,9 @@ add_library(quantum_crypto STATIC src/quantum_crypto.c)
 target_link_libraries(quantum_crypto PRIVATE oqs)
 target_include_directories(quantum_crypto PUBLIC src liboqs/src/common)
 
+# Main build target for Day 15 Dilithium Signing
+add_executable(dilithium_sign src/dilithium_sign.c)
+target_link_libraries(dilithium_sign PRIVATE oqs)
+target_include_directories(dilithium_sign PRIVATE liboqs/src/common)
+
 
