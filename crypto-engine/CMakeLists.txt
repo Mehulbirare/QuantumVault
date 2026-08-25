@@ -31,4 +31,9 @@ add_executable(dilithium_sign src/dilithium_sign.c)
 target_link_libraries(dilithium_sign PRIVATE oqs)
 target_include_directories(dilithium_sign PRIVATE liboqs/src/common)
 
+# Main build target for Day 16 Dilithium Verification
+add_executable(dilithium_verify src/dilithium_verify.c)
+target_link_libraries(dilithium_verify PRIVATE oqs)
+target_include_directories(dilithium_verify PRIVATE liboqs/src/common)
+
 
