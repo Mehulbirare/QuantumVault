@@ -20,7 +20,15 @@ use std::{
 
 unsafe extern "C" {
     fn quantumvault_ffi_test() -> i32;
+
     fn quantumvault_mldsa_test() -> i32;
+
+    fn quantumvault_mldsa_sign_data(
+        data: *const u8,
+        data_len: usize,
+        signature: *mut u8,
+        signature_len: *mut usize,
+    ) -> i32;
 }
 
 const TTL: Duration = Duration::from_secs(1);
@@ -30,6 +38,8 @@ const HELLO_INO: u64 = 2;
 
 const ENCRYPTION_KEY: [u8; 32] = [0x42; 32];
 const ENCRYPTION_NONCE: [u8; 12] = *b"QVNonce12345";
+
+const SIGNATURE_FILE: &str = "/tmp/quantumvault_signature.bin";
 
 struct QuantumVaultFS {
     backing_file: PathBuf,
@@ -66,6 +76,34 @@ impl QuantumVaultFS {
             .open(&self.backing_file)
             .map(|_| ())
             .map_err(|_| ())
+    }
+
+    fn sign_data(&self, data: &[u8]) -> Result<Vec<u8>, ()> {
+        const ML_DSA_65_SIGNATURE_SIZE: usize = 3309;
+
+        let mut signature = vec![0u8; ML_DSA_65_SIGNATURE_SIZE];
+        let mut signature_len: usize = 0;
+
+        let result = unsafe {
+            quantumvault_mldsa_sign_data(
+                data.as_ptr(),
+                data.len(),
+                signature.as_mut_ptr(),
+                &mut signature_len,
+            )
+        };
+
+        if result != 1 || signature_len == 0 {
+            println!(
+                "[Rust] ERROR: ML-DSA-65 signing failed"
+            );
+
+            return Err(());
+        }
+
+        signature.truncate(signature_len);
+
+        Ok(signature)
     }
 }
 
@@ -196,8 +234,14 @@ impl Filesystem for QuantumVaultFS {
                     return;
                 }
 
+                let _ = std::fs::remove_file(SIGNATURE_FILE);
+
                 println!(
                     "[Rust] Encrypted backing file truncated successfully"
+                );
+
+                println!(
+                    "[Rust] ML-DSA signature evidence cleared"
                 );
             }
         }
@@ -289,6 +333,68 @@ impl Filesystem for QuantumVaultFS {
             offset
         );
 
+        /*
+         * QV-17 DIGITAL SIGNATURE
+         *
+         * Sign the plaintext before encryption so the vault
+         * retains cryptographic integrity evidence for the
+         * original file content.
+         */
+        println!(
+            "[Rust] QV-17: Generating ML-DSA-65 signature..."
+        );
+
+        let signature = match self.sign_data(data) {
+            Ok(signature) => signature,
+
+            Err(_) => {
+                println!(
+                    "[Rust] ERROR: ML-DSA-65 signature generation failed"
+                );
+
+                reply.error(EIO);
+                return;
+            }
+        };
+
+        println!(
+            "[Rust] QV-17: ML-DSA-65 signature generated successfully"
+        );
+
+        println!(
+            "[Rust] QV-17: Signature size: {} bytes",
+            signature.len()
+        );
+
+        let signature_write_result = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(SIGNATURE_FILE)
+            .and_then(|mut file| {
+                file.write_all(&signature)?;
+                file.flush()?;
+                Ok(())
+            });
+
+        if let Err(error) = signature_write_result {
+            println!(
+                "[Rust] ERROR: Failed to write ML-DSA signature: {}",
+                error
+            );
+
+            reply.error(EIO);
+            return;
+        }
+
+        println!(
+            "[Rust] QV-17: Signature written to: {}",
+            SIGNATURE_FILE
+        );
+
+        /*
+         * Existing AES-GCM encryption flow.
+         */
         let ciphertext = match self.encrypt_data(data) {
             Ok(ciphertext) => ciphertext,
 
@@ -332,6 +438,10 @@ impl Filesystem for QuantumVaultFS {
                 println!(
                     "[Rust] Encrypted data written to: {}",
                     self.backing_file.display()
+                );
+
+                println!(
+                    "[Rust] QV-17: Digital signature + encryption completed"
                 );
 
                 reply.written(data.len() as u32);
@@ -399,9 +509,6 @@ fn main() {
     println!("QuantumVault filesystem");
     println!("Mounting at: {}", mountpoint);
 
-    /*
-     * ML-KEM-768 FFI test
-     */
     let ffi_result = unsafe {
         quantumvault_ffi_test()
     };
@@ -421,9 +528,6 @@ fn main() {
         );
     }
 
-    /*
-     * ML-DSA-65 FFI test
-     */
     let mldsa_result = unsafe {
         quantumvault_mldsa_test()
     };
@@ -451,6 +555,11 @@ fn main() {
     println!(
         "[Rust] Encrypted backing file: {}",
         backing_file.display()
+    );
+
+    println!(
+        "[Rust] ML-DSA signature file: {}",
+        SIGNATURE_FILE
     );
 
     fuser::mount2(
