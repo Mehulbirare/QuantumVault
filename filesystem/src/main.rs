@@ -20,6 +20,7 @@ use std::{
 
 unsafe extern "C" {
     fn quantumvault_ffi_test() -> i32;
+    fn quantumvault_mldsa_test() -> i32;
 }
 
 const TTL: Duration = Duration::from_secs(1);
@@ -398,6 +399,9 @@ fn main() {
     println!("QuantumVault filesystem");
     println!("Mounting at: {}", mountpoint);
 
+    /*
+     * ML-KEM-768 FFI test
+     */
     let ffi_result = unsafe {
         quantumvault_ffi_test()
     };
@@ -414,6 +418,28 @@ fn main() {
     } else {
         println!(
             "[Rust] WARNING: PQC FFI test failed"
+        );
+    }
+
+    /*
+     * ML-DSA-65 FFI test
+     */
+    let mldsa_result = unsafe {
+        quantumvault_mldsa_test()
+    };
+
+    println!(
+        "[Rust] ML-DSA FFI test returned: {}",
+        mldsa_result
+    );
+
+    if mldsa_result == 1 {
+        println!(
+            "[Rust] ML-DSA FFI test successful"
+        );
+    } else {
+        println!(
+            "[Rust] WARNING: ML-DSA FFI test failed"
         );
     }
 
