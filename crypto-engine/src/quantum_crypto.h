@@ -37,4 +37,25 @@ int qv_kyber_decaps(uint8_t *shared_secret, const uint8_t *ciphertext, const uin
 // Performs input ^ key stream, writing to output.
 void qv_xor_cipher(const uint8_t *input, uint8_t *output, size_t len, const uint8_t *key, size_t key_len);
 
+// Get Dilithium-3 parameters
+size_t qv_dilithium_public_key_bytes(void);
+size_t qv_dilithium_secret_key_bytes(void);
+size_t qv_dilithium_signature_bytes(void);
+
+// Key generation for Dilithium-3.
+// public_key must point to a buffer of at least qv_dilithium_public_key_bytes() bytes.
+// secret_key must point to a buffer of at least qv_dilithium_secret_key_bytes() bytes.
+// Returns 0 on success, non-zero on error.
+int qv_dilithium_keygen(uint8_t *public_key, uint8_t *secret_key);
+
+// Sign a message using CRYSTALS-Dilithium-3.
+// signature must point to a buffer of at least qv_dilithium_signature_bytes() bytes.
+// signature_len will receive the actual signature size.
+// Returns 0 on success, non-zero on error.
+int qv_dilithium_sign(uint8_t *signature, size_t *signature_len, const uint8_t *message, size_t message_len, const uint8_t *secret_key);
+
+// Verify a message signature using CRYSTALS-Dilithium-3.
+// Returns 0 on success (signature is valid), non-zero on error or verification failure.
+int qv_dilithium_verify(const uint8_t *message, size_t message_len, const uint8_t *signature, size_t signature_len, const uint8_t *public_key);
+
 #endif // QUANTUM_CRYPTO_H

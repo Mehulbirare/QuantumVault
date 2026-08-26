@@ -14,6 +14,13 @@ extern "C" {
     fn qv_kyber_encaps(ciphertext: *mut u8, shared_secret: *mut u8, public_key: *const u8) -> libc::c_int;
     fn qv_kyber_decaps(shared_secret: *mut u8, ciphertext: *const u8, secret_key: *const u8) -> libc::c_int;
     fn qv_xor_cipher(input: *const u8, output: *mut u8, len: usize, key: *const u8, key_len: usize);
+
+    fn qv_dilithium_public_key_bytes() -> usize;
+    fn qv_dilithium_secret_key_bytes() -> usize;
+    fn qv_dilithium_signature_bytes() -> usize;
+    fn qv_dilithium_keygen(public_key: *mut u8, secret_key: *mut u8) -> libc::c_int;
+    fn qv_dilithium_sign(signature: *mut u8, signature_len: *mut usize, message: *const u8, message_len: usize, secret_key: *const u8) -> libc::c_int;
+    fn qv_dilithium_verify(message: *const u8, message_len: usize, signature: *const u8, signature_len: usize, public_key: *const u8) -> libc::c_int;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +31,9 @@ pub enum CryptoError {
     DecapsulationFailed(i32),
     InvalidKeyLength,
     InvalidCiphertextLength,
+    SignatureFailed(i32),
+    VerificationFailed,
+    InvalidSignatureLength,
 }
 
 impl fmt::Display for CryptoError {
@@ -35,6 +45,9 @@ impl fmt::Display for CryptoError {
             CryptoError::DecapsulationFailed(code) => write!(f, "Kyber decapsulation failed with error code: {}", code),
             CryptoError::InvalidKeyLength => write!(f, "Provided key length is invalid"),
             CryptoError::InvalidCiphertextLength => write!(f, "Provided ciphertext length is invalid"),
+            CryptoError::SignatureFailed(code) => write!(f, "Dilithium signing failed with error code: {}", code),
+            CryptoError::VerificationFailed => write!(f, "Dilithium signature verification failed"),
+            CryptoError::InvalidSignatureLength => write!(f, "Provided signature length is invalid"),
         }
     }
 }
@@ -180,6 +193,96 @@ pub fn decrypt(
     Ok(plaintext)
 }
 
+#[derive(Clone)]
+pub struct DilithiumKeys {
+    pub public_key: Vec<u8>,
+    pub secret_key: Vec<u8>,
+}
+
+/// Generates a new CRYSTALS-Dilithium-3 keypair.
+pub fn generate_dilithium_keypair() -> Result<DilithiumKeys, CryptoError> {
+    init();
+    
+    let pub_len = unsafe { qv_dilithium_public_key_bytes() };
+    let sec_len = unsafe { qv_dilithium_secret_key_bytes() };
+    
+    if pub_len == 0 || sec_len == 0 {
+        return Err(CryptoError::InitializationFailed);
+    }
+    
+    let mut public_key = vec![0u8; pub_len];
+    let mut secret_key = vec![0u8; sec_len];
+    
+    let result = unsafe {
+        qv_dilithium_keygen(public_key.as_mut_ptr(), secret_key.as_mut_ptr())
+    };
+    
+    if result == 0 {
+        Ok(DilithiumKeys { public_key, secret_key })
+    } else {
+        Err(CryptoError::KeygenFailed(result))
+    }
+}
+
+/// Signs a message using CRYSTALS-Dilithium-3.
+pub fn sign(message: &[u8], secret_key: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    init();
+    
+    let sec_len = unsafe { qv_dilithium_secret_key_bytes() };
+    let sig_max_len = unsafe { qv_dilithium_signature_bytes() };
+    
+    if secret_key.len() != sec_len {
+        return Err(CryptoError::InvalidKeyLength);
+    }
+    
+    let mut signature = vec![0u8; sig_max_len];
+    let mut signature_len = 0;
+    
+    let result = unsafe {
+        qv_dilithium_sign(
+            signature.as_mut_ptr(),
+            &mut signature_len,
+            message.as_ptr(),
+            message.len(),
+            secret_key.as_ptr(),
+        )
+    };
+    
+    if result == 0 {
+        signature.truncate(signature_len);
+        Ok(signature)
+    } else {
+        Err(CryptoError::SignatureFailed(result))
+    }
+}
+
+/// Verifies a signature using CRYSTALS-Dilithium-3.
+pub fn verify(message: &[u8], signature: &[u8], public_key: &[u8]) -> Result<(), CryptoError> {
+    init();
+    
+    let pub_len = unsafe { qv_dilithium_public_key_bytes() };
+    
+    if public_key.len() != pub_len {
+        return Err(CryptoError::InvalidKeyLength);
+    }
+    
+    let result = unsafe {
+        qv_dilithium_verify(
+            message.as_ptr(),
+            message.len(),
+            signature.as_ptr(),
+            signature.len(),
+            public_key.as_ptr(),
+        )
+    };
+    
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(CryptoError::VerificationFailed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,6 +343,47 @@ mod tests {
         bad_kem_ciphertext.pop();
         let res = decrypt(&encrypted.ciphertext, &bad_kem_ciphertext, &keys.secret_key);
         assert_eq!(res.err(), Some(CryptoError::InvalidCiphertextLength));
+    }
+
+    #[test]
+    fn test_dilithium_keygen_and_sign_verify_roundtrip() {
+        let keys = generate_dilithium_keypair().expect("Dilithium keypair generation failed");
+        
+        let expected_pub_len = unsafe { qv_dilithium_public_key_bytes() };
+        let expected_sec_len = unsafe { qv_dilithium_secret_key_bytes() };
+        
+        assert_eq!(keys.public_key.len(), expected_pub_len);
+        assert_eq!(keys.secret_key.len(), expected_sec_len);
+
+        let test_message = b"Verification test message for CRYSTALS-Dilithium-3!";
+        let signature = sign(test_message, &keys.secret_key).expect("Dilithium signing failed");
+        
+        let verify_res = verify(test_message, &signature, &keys.public_key);
+        assert!(verify_res.is_ok(), "Dilithium verification failed for valid message and signature");
+    }
+
+    #[test]
+    fn test_dilithium_tampering() {
+        let keys = generate_dilithium_keypair().expect("Dilithium keypair generation failed");
+        let test_message = b"Original document message contents";
+        
+        let signature = sign(test_message, &keys.secret_key).expect("Dilithium signing failed");
+        
+        // 1. Verify that a modified message fails verification
+        let mut tampered_message = test_message.to_vec();
+        if !tampered_message.is_empty() {
+            tampered_message[0] ^= 0xFF; // Modify one character
+        }
+        let verify_res = verify(&tampered_message, &signature, &keys.public_key);
+        assert_eq!(verify_res.err(), Some(CryptoError::VerificationFailed));
+        
+        // 2. Verify that a modified signature fails verification
+        let mut tampered_signature = signature.clone();
+        if !tampered_signature.is_empty() {
+            tampered_signature[0] ^= 0xFF; // Modify signature byte
+        }
+        let verify_res = verify(test_message, &tampered_signature, &keys.public_key);
+        assert_eq!(verify_res.err(), Some(CryptoError::VerificationFailed));
     }
 }
 

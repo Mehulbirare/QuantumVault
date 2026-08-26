@@ -75,3 +75,51 @@ void qv_xor_cipher(const uint8_t *input, uint8_t *output, size_t len, const uint
         output[i] = input[i] ^ key[i % key_len];
     }
 }
+
+size_t qv_dilithium_public_key_bytes(void) {
+    OQS_SIG *sig = OQS_SIG_new(OQS_SIG_alg_dilithium_3);
+    if (sig == NULL) return 0;
+    size_t len = sig->length_public_key;
+    OQS_SIG_free(sig);
+    return len;
+}
+
+size_t qv_dilithium_secret_key_bytes(void) {
+    OQS_SIG *sig = OQS_SIG_new(OQS_SIG_alg_dilithium_3);
+    if (sig == NULL) return 0;
+    size_t len = sig->length_secret_key;
+    OQS_SIG_free(sig);
+    return len;
+}
+
+size_t qv_dilithium_signature_bytes(void) {
+    OQS_SIG *sig = OQS_SIG_new(OQS_SIG_alg_dilithium_3);
+    if (sig == NULL) return 0;
+    size_t len = sig->length_signature;
+    OQS_SIG_free(sig);
+    return len;
+}
+
+int qv_dilithium_keygen(uint8_t *public_key, uint8_t *secret_key) {
+    OQS_SIG *sig = OQS_SIG_new(OQS_SIG_alg_dilithium_3);
+    if (sig == NULL) return -1;
+    OQS_STATUS rc = OQS_SIG_keypair(sig, public_key, secret_key);
+    OQS_SIG_free(sig);
+    return (rc == OQS_SUCCESS) ? 0 : -2;
+}
+
+int qv_dilithium_sign(uint8_t *signature, size_t *signature_len, const uint8_t *message, size_t message_len, const uint8_t *secret_key) {
+    OQS_SIG *sig = OQS_SIG_new(OQS_SIG_alg_dilithium_3);
+    if (sig == NULL) return -1;
+    OQS_STATUS rc = OQS_SIG_sign(sig, signature, signature_len, message, message_len, secret_key);
+    OQS_SIG_free(sig);
+    return (rc == OQS_SUCCESS) ? 0 : -2;
+}
+
+int qv_dilithium_verify(const uint8_t *message, size_t message_len, const uint8_t *signature, size_t signature_len, const uint8_t *public_key) {
+    OQS_SIG *sig = OQS_SIG_new(OQS_SIG_alg_dilithium_3);
+    if (sig == NULL) return -1;
+    OQS_STATUS rc = OQS_SIG_verify(sig, message, message_len, signature, signature_len, public_key);
+    OQS_SIG_free(sig);
+    return (rc == OQS_SUCCESS) ? 0 : -2;
+}

@@ -33,3 +33,41 @@ void qv_xor_cipher(const uint8_t *input, uint8_t *output, size_t len, const uint
         output[i] = input[i] ^ key[i % key_len];
     }
 }
+
+size_t qv_dilithium_public_key_bytes(void) { return 1952; }
+size_t qv_dilithium_secret_key_bytes(void) { return 4016; }
+size_t qv_dilithium_signature_bytes(void) { return 3293; }
+
+int qv_dilithium_keygen(uint8_t *public_key, uint8_t *secret_key) {
+    for (int i = 0; i < 1952; i++) public_key[i] = i % 256;
+    for (int i = 0; i < 4016; i++) secret_key[i] = (255 - i) % 256;
+    return 0;
+}
+
+int qv_dilithium_sign(uint8_t *signature, size_t *signature_len, const uint8_t *message, size_t message_len, const uint8_t *secret_key) {
+    (void)secret_key;
+    *signature_len = 3293;
+    signature[0] = 0xAA;
+    if (message_len > 0) {
+        signature[1] = message[0] ^ message[message_len - 1] ^ (uint8_t)message_len;
+    } else {
+        signature[1] = 0;
+    }
+    for (int i = 2; i < 3293; i++) signature[i] = i % 256;
+    return 0;
+}
+
+int qv_dilithium_verify(const uint8_t *message, size_t message_len, const uint8_t *signature, size_t signature_len, const uint8_t *public_key) {
+    (void)public_key;
+    if (signature_len != 3293 || signature[0] != 0xAA) {
+        return -2;
+    }
+    uint8_t expected_checksum = 0;
+    if (message_len > 0) {
+        expected_checksum = message[0] ^ message[message_len - 1] ^ (uint8_t)message_len;
+    }
+    if (signature[1] != expected_checksum) {
+        return -3;
+    }
+    return 0;
+}
