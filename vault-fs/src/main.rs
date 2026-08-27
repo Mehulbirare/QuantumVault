@@ -423,12 +423,71 @@ impl Filesystem for QuantumFS {
 
         match std::fs::read(&full_path) {
             Ok(disk_data) => {
+                if disk_data.is_empty() {
+                    // Check signature for empty payload
+                    let mut sig_path = full_path.clone();
+                    let mut file_name = match full_path.file_name() {
+                        Some(n) => n.to_os_string(),
+                        None => {
+                            reply.error(libc::EIO);
+                            return;
+                        }
+                    };
+                    file_name.push(".sig");
+                    sig_path.set_file_name(file_name);
+
+                    let signature = match std::fs::read(&sig_path) {
+                        Ok(sig) => sig,
+                        Err(_) => {
+                            log::error!("Missing signature for empty file: {:?}", full_path);
+                            reply.error(libc::EIO);
+                            return;
+                        }
+                    };
+
+                    if crypto::verify(b"", &signature, &self.dilithium_public).is_err() {
+                        log::error!("Signature verification failed for empty file: {:?}", full_path);
+                        reply.error(libc::EIO);
+                        return;
+                    }
+
+                    reply.data(&[]);
+                    return;
+                }
+
                 if disk_data.len() >= 1088 {
                     let kem_ciphertext = &disk_data[0..1088];
                     let ciphertext = &disk_data[1088..];
                     
                     match crypto::decrypt(ciphertext, kem_ciphertext, &self.secret_key) {
                         Ok(plaintext) => {
+                            // Verify signature on plaintext
+                            let mut sig_path = full_path.clone();
+                            let mut file_name = match full_path.file_name() {
+                                Some(n) => n.to_os_string(),
+                                None => {
+                                    reply.error(libc::EIO);
+                                    return;
+                                }
+                            };
+                            file_name.push(".sig");
+                            sig_path.set_file_name(file_name);
+
+                            let signature = match std::fs::read(&sig_path) {
+                                Ok(sig) => sig,
+                                Err(_) => {
+                                    log::error!("Missing signature for file: {:?}", full_path);
+                                    reply.error(libc::EIO);
+                                    return;
+                                }
+                            };
+
+                            if crypto::verify(&plaintext, &signature, &self.dilithium_public).is_err() {
+                                log::error!("Signature verification failed during read of {:?}", full_path);
+                                reply.error(libc::EIO);
+                                return;
+                            }
+
                             let plaintext_len = plaintext.len() as i64;
                             if offset < plaintext_len {
                                 let start = offset as usize;
@@ -444,7 +503,8 @@ impl Filesystem for QuantumFS {
                         }
                     }
                 } else {
-                    reply.data(&[]);
+                    log::error!("Corrupted backing file size {} < 1088 during read of {:?}", disk_data.len(), full_path);
+                    reply.error(libc::EIO);
                 }
             }
             Err(_) => reply.error(libc::EIO),
