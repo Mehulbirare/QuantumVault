@@ -29,6 +29,13 @@ unsafe extern "C" {
         signature: *mut u8,
         signature_len: *mut usize,
     ) -> i32;
+
+    fn quantumvault_mldsa_verify_data(
+        data: *const u8,
+        data_len: usize,
+        signature: *const u8,
+        signature_len: usize,
+    ) -> i32;
 }
 
 const TTL: Duration = Duration::from_secs(1);
@@ -281,6 +288,66 @@ impl Filesystem for QuantumVaultFS {
 
         match self.decrypt_data(&encrypted_data) {
             Ok(plaintext) => {
+                println!(
+                    "[Rust] QV-19: AES-GCM decryption successful"
+                );
+
+                let mut signature = Vec::new();
+
+                match OpenOptions::new()
+                    .read(true)
+                    .open(SIGNATURE_FILE)
+                    .and_then(|mut file| {
+                        file.read_to_end(&mut signature)
+                    })
+                {
+                    Ok(_) => {
+                        if signature.is_empty() {
+                            println!(
+                                "[Rust] QV-19 ERROR: Signature evidence is empty"
+                            );
+
+                            reply.error(EIO);
+                            return;
+                        }
+                    }
+
+                    Err(_) => {
+                        println!(
+                            "[Rust] QV-19 ERROR: Failed to read ML-DSA signature evidence"
+                        );
+
+                        reply.error(EIO);
+                        return;
+                    }
+                }
+
+                println!(
+                    "[Rust] QV-19: Verifying ML-DSA-65 signature..."
+                );
+
+                let verify_result = unsafe {
+                    quantumvault_mldsa_verify_data(
+                        plaintext.as_ptr(),
+                        plaintext.len(),
+                        signature.as_ptr(),
+                        signature.len(),
+                    )
+                };
+
+                if verify_result != 1 {
+                    println!(
+                        "[Rust] QV-19 ERROR: ML-DSA-65 signature verification failed"
+                    );
+
+                    reply.error(EIO);
+                    return;
+                }
+
+                println!(
+                    "[Rust] QV-19: ML-DSA-65 signature verification successful"
+                );
+
                 let start = offset.max(0) as usize;
 
                 if start >= plaintext.len() {
