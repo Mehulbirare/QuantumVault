@@ -249,6 +249,9 @@ pub fn sign(message: &[u8], secret_key: &[u8]) -> Result<Vec<u8>, CryptoError> {
     };
     
     if result == 0 {
+        if signature_len > sig_max_len {
+            return Err(CryptoError::InvalidSignatureLength);
+        }
         signature.truncate(signature_len);
         Ok(signature)
     } else {
@@ -261,9 +264,14 @@ pub fn verify(message: &[u8], signature: &[u8], public_key: &[u8]) -> Result<(),
     init();
     
     let pub_len = unsafe { qv_dilithium_public_key_bytes() };
+    let sig_max_len = unsafe { qv_dilithium_signature_bytes() };
     
     if public_key.len() != pub_len {
         return Err(CryptoError::InvalidKeyLength);
+    }
+    
+    if signature.is_empty() || signature.len() > sig_max_len {
+        return Err(CryptoError::InvalidSignatureLength);
     }
     
     let result = unsafe {
@@ -384,6 +392,24 @@ mod tests {
         }
         let verify_res = verify(test_message, &tampered_signature, &keys.public_key);
         assert_eq!(verify_res.err(), Some(CryptoError::VerificationFailed));
+    }
+
+    #[test]
+    fn test_dilithium_edge_cases() {
+        let keys = generate_dilithium_keypair().expect("Dilithium keypair generation failed");
+        let test_message = b"Edge cases payload";
+        let signature = sign(test_message, &keys.secret_key).expect("Dilithium signing failed");
+
+        // 1. Zero-length signature verification
+        let res = verify(test_message, &[], &keys.public_key);
+        assert_eq!(res.err(), Some(CryptoError::InvalidSignatureLength));
+
+        // 2. Excessively long signature verification
+        let sig_max_len = unsafe { qv_dilithium_signature_bytes() };
+        let mut huge_signature = vec![0u8; sig_max_len + 1];
+        huge_signature[0..signature.len()].copy_from_slice(&signature);
+        let res = verify(test_message, &huge_signature, &keys.public_key);
+        assert_eq!(res.err(), Some(CryptoError::InvalidSignatureLength));
     }
 }
 
