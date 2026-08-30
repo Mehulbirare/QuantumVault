@@ -8,3 +8,5 @@ clap = { version = "4.4", features = ["derive"] }
 libc = "0.2"
 log = "0.4"
 env_logger = "0.11"
+vault_fs = { path = "../vault-fs" }
+

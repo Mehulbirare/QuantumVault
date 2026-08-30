@@ -12,3 +12,12 @@ env_logger = "0.11"
 [build-dependencies]
 cc = "1.0"
 
+[lib]
+name = "vault_fs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vault-fs"
+path = "src/main.rs"
+
+
