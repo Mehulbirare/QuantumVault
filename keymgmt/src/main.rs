@@ -38,6 +38,16 @@ impl LockedKeyBuffer {
 
 impl Drop for LockedKeyBuffer {
     fn drop(&mut self) {
+        // Securely zero out the key data in memory using volatile writes
+        // to prevent compiler optimization from stripping the zeroing
+        unsafe {
+            let ptr = self.data.as_mut_ptr();
+            for i in 0..self.data.len() {
+                std::ptr::write_volatile(ptr.add(i), 0);
+            }
+        }
+        log::info!("Secure memory wipe completed: key buffer zeroed out.");
+
         #[cfg(target_family = "unix")]
         unsafe {
             let addr = self.data.as_ptr() as *const libc::c_void;
