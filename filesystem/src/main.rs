@@ -4,16 +4,20 @@ use aes_gcm::{
 };
 
 use fuser::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory,
-    ReplyEntry, ReplyOpen, ReplyWrite, Request, TimeOrNow,
+    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData,
+    ReplyDirectory, ReplyEntry, ReplyOpen, ReplyWrite,
+    Request, TimeOrNow,
 };
 
 use libc::{EIO, ENOENT};
 
+use rpassword::read_password;
+use sha2::{Digest, Sha256};
+
 use std::{
     ffi::OsStr,
-    fs::OpenOptions,
-    io::{Read, Write},
+    fs::{self, OpenOptions},
+    io::{self, Read, Write},
     path::PathBuf,
     time::{Duration, SystemTime},
 };
@@ -47,6 +51,8 @@ const ENCRYPTION_KEY: [u8; 32] = [0x42; 32];
 const ENCRYPTION_NONCE: [u8; 12] = *b"QVNonce12345";
 
 const SIGNATURE_FILE: &str = "/tmp/quantumvault_signature.bin";
+const MASTER_PASSWORD_HASH_FILE: &str =
+    "/tmp/quantumvault_master_password.sha256";
 
 const SIGNATURE_MAGIC: &[u8; 4] = b"QV20";
 const SIGNATURE_HEADER_SIZE: usize = 12;
@@ -91,7 +97,9 @@ impl QuantumVaultFS {
     fn sign_data(&self, data: &[u8]) -> Result<Vec<u8>, ()> {
         const ML_DSA_65_SIGNATURE_SIZE: usize = 3309;
 
-        let mut signature = vec![0u8; ML_DSA_65_SIGNATURE_SIZE];
+        let mut signature =
+            vec![0u8; ML_DSA_65_SIGNATURE_SIZE];
+
         let mut signature_len: usize = 0;
 
         let result = unsafe {
@@ -125,7 +133,9 @@ impl Filesystem for QuantumVaultFS {
         name: &OsStr,
         reply: ReplyEntry,
     ) {
-        if parent == ROOT_INO && name.to_str() == Some("hello.txt") {
+        if parent == ROOT_INO
+            && name.to_str() == Some("hello.txt")
+        {
             reply.entry(&TTL, &hello_attr(), 0);
         } else {
             reply.error(ENOENT);
@@ -170,7 +180,11 @@ impl Filesystem for QuantumVaultFS {
         let entries = [
             (ROOT_INO, FileType::Directory, "."),
             (ROOT_INO, FileType::Directory, ".."),
-            (HELLO_INO, FileType::RegularFile, "hello.txt"),
+            (
+                HELLO_INO,
+                FileType::RegularFile,
+                "hello.txt",
+            ),
         ];
 
         for (i, (entry_ino, kind, name)) in entries
@@ -244,7 +258,7 @@ impl Filesystem for QuantumVaultFS {
                     return;
                 }
 
-                let _ = std::fs::remove_file(SIGNATURE_FILE);
+                let _ = fs::remove_file(SIGNATURE_FILE);
 
                 println!(
                     "[Rust] Encrypted backing file truncated successfully"
@@ -259,185 +273,177 @@ impl Filesystem for QuantumVaultFS {
         reply.attr(&TTL, &hello_attr());
     }
 
-fn read(
-    &mut self,
-    _req: &Request<'_>,
-    ino: u64,
-    _fh: u64,
-    offset: i64,
-    size: u32,
-    _flags: i32,
-    _lock_owner: Option<u64>,
-    reply: ReplyData,
-) {
-    if ino != HELLO_INO {
-        reply.error(ENOENT);
-        return;
-    }
+    fn read(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        size: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        reply: ReplyData,
+    ) {
+        if ino != HELLO_INO {
+            reply.error(ENOENT);
+            return;
+        }
 
-    let mut encrypted_data = Vec::new();
+        let mut encrypted_data = Vec::new();
 
-    let read_result = OpenOptions::new()
-        .read(true)
-        .open(&self.backing_file)
-        .and_then(|mut file| {
-            file.read_to_end(&mut encrypted_data)
-        });
+        let read_result = OpenOptions::new()
+            .read(true)
+            .open(&self.backing_file)
+            .and_then(|mut file| {
+                file.read_to_end(&mut encrypted_data)
+            });
 
-    if read_result.is_err() || encrypted_data.is_empty() {
-        reply.data(&[]);
-        return;
-    }
+        if read_result.is_err()
+            || encrypted_data.is_empty()
+        {
+            reply.data(&[]);
+            return;
+        }
 
-    match self.decrypt_data(&encrypted_data) {
-        Ok(plaintext) => {
-            println!(
-                "[Rust] QV-19: AES-GCM decryption successful"
-            );
+        match self.decrypt_data(&encrypted_data) {
+            Ok(plaintext) => {
+                println!(
+                    "[Rust] QV-19: AES-GCM decryption successful"
+                );
 
-            /*
-             * QV-20 SIGNATURE EVIDENCE VALIDATION
-             *
-             * Signature file format:
-             *
-             * Bytes 0..4   = QV20 magic
-             * Bytes 4..12  = plaintext length as u64 LE
-             * Bytes 12..   = ML-DSA-65 signature
-             */
-            let mut signature_evidence = Vec::new();
+                let mut signature_evidence =
+                    Vec::new();
 
-            match OpenOptions::new()
-                .read(true)
-                .open(SIGNATURE_FILE)
-                .and_then(|mut file| {
-                    file.read_to_end(&mut signature_evidence)
-                })
-            {
-                Ok(_) => {}
+                match OpenOptions::new()
+                    .read(true)
+                    .open(SIGNATURE_FILE)
+                    .and_then(|mut file| {
+                        file.read_to_end(
+                            &mut signature_evidence,
+                        )
+                    })
+                {
+                    Ok(_) => {}
 
-                Err(_) => {
+                    Err(_) => {
+                        println!(
+                            "[Rust] QV-20 ERROR: Failed to read signature evidence"
+                        );
+
+                        reply.error(EIO);
+                        return;
+                    }
+                }
+
+                if signature_evidence.len()
+                    < SIGNATURE_HEADER_SIZE
+                {
                     println!(
-                        "[Rust] QV-20 ERROR: Failed to read signature evidence"
+                        "[Rust] QV-20 ERROR: Signature evidence is too small"
                     );
 
                     reply.error(EIO);
                     return;
                 }
-            }
 
-            if signature_evidence.len() < SIGNATURE_HEADER_SIZE {
-                println!(
-                    "[Rust] QV-20 ERROR: Signature evidence is too small"
+                if &signature_evidence[0..4]
+                    != SIGNATURE_MAGIC
+                {
+                    println!(
+                        "[Rust] QV-20 ERROR: Invalid signature evidence magic"
+                    );
+
+                    reply.error(EIO);
+                    return;
+                }
+
+                let mut length_bytes = [0u8; 8];
+
+                length_bytes.copy_from_slice(
+                    &signature_evidence[4..12],
                 );
 
-                reply.error(EIO);
-                return;
-            }
+                let expected_plaintext_len =
+                    u64::from_le_bytes(length_bytes);
 
-            if &signature_evidence[0..4] != SIGNATURE_MAGIC {
+                if expected_plaintext_len
+                    != plaintext.len() as u64
+                {
+                    println!(
+                        "[Rust] QV-20 ERROR: Plaintext length mismatch"
+                    );
+
+                    reply.error(EIO);
+                    return;
+                }
+
+                let signature =
+                    &signature_evidence
+                        [SIGNATURE_HEADER_SIZE..];
+
+                if signature.is_empty() {
+                    println!(
+                        "[Rust] QV-20 ERROR: ML-DSA signature is empty"
+                    );
+
+                    reply.error(EIO);
+                    return;
+                }
+
                 println!(
-                    "[Rust] QV-20 ERROR: Invalid signature evidence magic"
+                    "[Rust] QV-20: Signature evidence validated"
                 );
 
-                reply.error(EIO);
-                return;
-            }
-
-            let mut length_bytes = [0u8; 8];
-
-            length_bytes.copy_from_slice(
-                &signature_evidence[4..12]
-            );
-
-            let expected_plaintext_len =
-                u64::from_le_bytes(length_bytes);
-
-            if expected_plaintext_len != plaintext.len() as u64 {
                 println!(
-                    "[Rust] QV-20 ERROR: Plaintext length mismatch"
+                    "[Rust] QV-19: Verifying ML-DSA-65 signature..."
                 );
 
+                let verify_result = unsafe {
+                    quantumvault_mldsa_verify_data(
+                        plaintext.as_ptr(),
+                        plaintext.len(),
+                        signature.as_ptr(),
+                        signature.len(),
+                    )
+                };
+
+                if verify_result != 1 {
+                    println!(
+                        "[Rust] QV-19 ERROR: ML-DSA-65 signature verification failed"
+                    );
+
+                    reply.error(EIO);
+                    return;
+                }
+
                 println!(
-                    "[Rust] QV-20: Expected {} bytes, got {} bytes",
-                    expected_plaintext_len,
-                    plaintext.len()
+                    "[Rust] QV-19: ML-DSA-65 signature verification successful"
                 );
 
-                reply.error(EIO);
-                return;
-            }
+                let start = offset.max(0) as usize;
 
-            let signature =
-                &signature_evidence[SIGNATURE_HEADER_SIZE..];
+                if start >= plaintext.len() {
+                    reply.data(&[]);
+                    return;
+                }
 
-            if signature.is_empty() {
-                println!(
-                    "[Rust] QV-20 ERROR: ML-DSA signature is empty"
-                );
-
-                reply.error(EIO);
-                return;
-            }
-
-            println!(
-                "[Rust] QV-20: Signature evidence validated"
-            );
-
-            println!(
-                "[Rust] QV-20: Plaintext length verified: {} bytes",
-                plaintext.len()
-            );
-
-            println!(
-                "[Rust] QV-19: Verifying ML-DSA-65 signature..."
-            );
-
-            let verify_result = unsafe {
-                quantumvault_mldsa_verify_data(
-                    plaintext.as_ptr(),
+                let end = std::cmp::min(
+                    start + size as usize,
                     plaintext.len(),
-                    signature.as_ptr(),
-                    signature.len(),
-                )
-            };
+                );
 
-            if verify_result != 1 {
+                reply.data(&plaintext[start..end]);
+            }
+
+            Err(_) => {
                 println!(
-                    "[Rust] QV-19 ERROR: ML-DSA-65 signature verification failed"
+                    "[Rust] ERROR: AES-GCM decryption failed"
                 );
 
                 reply.error(EIO);
-                return;
             }
-
-            println!(
-                "[Rust] QV-19: ML-DSA-65 signature verification successful"
-            );
-
-            let start = offset.max(0) as usize;
-
-            if start >= plaintext.len() {
-                reply.data(&[]);
-                return;
-            }
-
-            let end = std::cmp::min(
-                start + size as usize,
-                plaintext.len(),
-            );
-
-            reply.data(&plaintext[start..end]);
-        }
-
-        Err(_) => {
-            println!(
-                "[Rust] ERROR: AES-GCM decryption failed"
-            );
-
-            reply.error(EIO);
         }
     }
-}
 
     fn write(
         &mut self,
@@ -466,13 +472,6 @@ fn read(
             offset
         );
 
-        /*
-         * QV-17 DIGITAL SIGNATURE
-         *
-         * Sign the plaintext before encryption so the vault
-         * retains cryptographic integrity evidence for the
-         * original file content.
-         */
         println!(
             "[Rust] QV-17: Generating ML-DSA-65 signature..."
         );
@@ -499,53 +498,45 @@ fn read(
             signature.len()
         );
 
-let mut signature_evidence = Vec::with_capacity(
-    SIGNATURE_HEADER_SIZE + signature.len()
-);
+        let mut signature_evidence =
+            Vec::with_capacity(
+                SIGNATURE_HEADER_SIZE
+                    + signature.len(),
+            );
 
-signature_evidence.extend_from_slice(SIGNATURE_MAGIC);
+        signature_evidence
+            .extend_from_slice(SIGNATURE_MAGIC);
 
-signature_evidence.extend_from_slice(
-    &(data.len() as u64).to_le_bytes()
-);
+        signature_evidence.extend_from_slice(
+            &(data.len() as u64).to_le_bytes(),
+        );
 
-signature_evidence.extend_from_slice(&signature);
+        signature_evidence
+            .extend_from_slice(&signature);
 
-println!(
-    "[Rust] QV-20: Signature evidence prepared"
-);
+        println!(
+            "[Rust] QV-20: Signature evidence prepared"
+        );
 
-println!(
-    "[Rust] QV-20: Magic = QV20"
-);
+        let signature_write_result =
+            OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(SIGNATURE_FILE)
+                .and_then(|mut file| {
+                    file.write_all(
+                        &signature_evidence,
+                    )?;
 
-println!(
-    "[Rust] QV-20: Plaintext length = {} bytes",
-    data.len()
-);
+                    file.flush()?;
 
-println!(
-    "[Rust] QV-20: Signature length = {} bytes",
-    signature.len()
-);
+                    Ok(())
+                });
 
-println!(
-    "[Rust] QV-20: Evidence length = {} bytes",
-    signature_evidence.len()
-);
-
-let signature_write_result = OpenOptions::new()
-    .create(true)
-    .write(true)
-    .truncate(true)
-    .open(SIGNATURE_FILE)
-    .and_then(|mut file| {
-        file.write_all(&signature_evidence)?;
-        file.flush()?;
-        Ok(())
-    });
-
-        if let Err(error) = signature_write_result {
+        if let Err(error) =
+            signature_write_result
+        {
             println!(
                 "[Rust] ERROR: Failed to write ML-DSA signature: {}",
                 error
@@ -560,34 +551,22 @@ let signature_write_result = OpenOptions::new()
             SIGNATURE_FILE
         );
 
-        /*
-         * Existing AES-GCM encryption flow.
-         */
-        let ciphertext = match self.encrypt_data(data) {
-            Ok(ciphertext) => ciphertext,
+        let ciphertext =
+            match self.encrypt_data(data) {
+                Ok(ciphertext) => ciphertext,
 
-            Err(_) => {
-                println!(
-                    "[Rust] ERROR: AES-GCM encryption failed"
-                );
+                Err(_) => {
+                    println!(
+                        "[Rust] ERROR: AES-GCM encryption failed"
+                    );
 
-                reply.error(EIO);
-                return;
-            }
-        };
+                    reply.error(EIO);
+                    return;
+                }
+            };
 
         println!(
             "[Rust] AES-GCM encryption successful"
-        );
-
-        println!(
-            "[Rust] Plaintext size: {} bytes",
-            data.len()
-        );
-
-        println!(
-            "[Rust] Ciphertext size: {} bytes",
-            ciphertext.len()
         );
 
         let write_result = OpenOptions::new()
@@ -667,53 +646,209 @@ fn hello_attr() -> FileAttr {
     }
 }
 
-fn main() {
-    let mountpoint = std::env::args()
-        .nth(1)
-        .expect(
-            "Usage: quantumvault-fuse <mountpoint>"
+/*
+ * QV-22
+ *
+ * Hash the master password with SHA-256.
+ *
+ * The plaintext password is never written to disk.
+ */
+fn hash_master_password(password: &str) -> String {
+    let mut hasher = Sha256::new();
+
+    hasher.update(password.as_bytes());
+
+    let digest = hasher.finalize();
+
+    digest
+        .iter()
+        .map(|byte| format!("{:02x}", byte))
+        .collect()
+}
+
+/*
+ * QV-22
+ *
+ * Create the vault master-password hash.
+ */
+fn setup_master_password() -> Result<(), ()> {
+    println!();
+    println!("======================================");
+    println!(" QuantumVault QV-22 Initialization");
+    println!("======================================");
+    println!();
+
+    println!("Set master password:");
+
+    let password =
+        read_password().map_err(|_| ())?;
+
+    if password.len() < 8 {
+        println!(
+            "[Rust] ERROR: Password must contain at least 8 characters"
         );
 
-    println!("QuantumVault filesystem");
-    println!("Mounting at: {}", mountpoint);
+        return Err(());
+    }
 
-    let ffi_result = unsafe {
+    println!("Confirm master password:");
+
+    let confirmation =
+        read_password().map_err(|_| ())?;
+
+    if password != confirmation {
+        println!(
+            "[Rust] ERROR: Password confirmation failed"
+        );
+
+        return Err(());
+    }
+
+    let password_hash =
+        hash_master_password(&password);
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(MASTER_PASSWORD_HASH_FILE)
+        .map_err(|_| ())?;
+
+    file.write_all(password_hash.as_bytes())
+        .map_err(|_| ())?;
+
+    file.flush().map_err(|_| ())?;
+
+    println!(
+        "[Rust] QV-22: Master password configured successfully"
+    );
+
+    println!(
+        "[Rust] QV-22: SHA-256 password hash stored at: {}",
+        MASTER_PASSWORD_HASH_FILE
+    );
+
+    Ok(())
+}
+
+/*
+ * QV-22
+ *
+ * Run the existing post-quantum cryptography
+ * initialization/test routines.
+ */
+fn generate_post_quantum_keys() -> bool {
+    println!();
+    println!(
+        "[Rust] QV-22: Generating post-quantum cryptographic keys..."
+    );
+
+    println!(
+        "[Rust] QV-22: Initializing ML-KEM-768..."
+    );
+
+    let kem_result = unsafe {
         quantumvault_ffi_test()
     };
 
-    println!(
-        "[Rust] FFI test returned: {}",
-        ffi_result
-    );
+    if kem_result != 1 {
+        println!(
+            "[Rust] QV-22 ERROR: ML-KEM-768 key generation failed"
+        );
 
-    if ffi_result == 1 {
-        println!(
-            "[Rust] PQC FFI test successful"
-        );
-    } else {
-        println!(
-            "[Rust] WARNING: PQC FFI test failed"
-        );
+        return false;
     }
 
-    let mldsa_result = unsafe {
+    println!(
+        "[Rust] QV-22: ML-KEM-768 key generation successful"
+    );
+
+    println!(
+        "[Rust] QV-22: Initializing ML-DSA-65..."
+    );
+
+    let dsa_result = unsafe {
         quantumvault_mldsa_test()
     };
 
+    if dsa_result != 1 {
+        println!(
+            "[Rust] QV-22 ERROR: ML-DSA-65 key generation failed"
+        );
+
+        return false;
+    }
+
     println!(
-        "[Rust] ML-DSA FFI test returned: {}",
-        mldsa_result
+        "[Rust] QV-22: ML-DSA-65 key generation successful"
     );
 
-    if mldsa_result == 1 {
+    println!(
+        "[Rust] QV-22: Post-quantum key generation completed"
+    );
+
+    true
+}
+
+fn initialize_vault() -> bool {
+    println!();
+    println!("--------------------------------------");
+    println!(" QuantumVault Vault Initialization");
+    println!("--------------------------------------");
+
+    if setup_master_password().is_err() {
         println!(
-            "[Rust] ML-DSA FFI test successful"
+            "[Rust] ERROR: Vault initialization failed"
         );
-    } else {
-        println!(
-            "[Rust] WARNING: ML-DSA FFI test failed"
-        );
+
+        return false;
     }
+
+    if !generate_post_quantum_keys() {
+        println!(
+            "[Rust] ERROR: Post-quantum key setup failed"
+        );
+
+        return false;
+    }
+
+    println!();
+    println!(
+        "[Rust] QV-22: Vault initialization completed successfully"
+    );
+
+    true
+}
+
+fn print_usage() {
+    println!();
+    println!("QuantumVault QV-22");
+    println!();
+    println!("Usage:");
+    println!(
+        "  quantumvault-fuse init <mountpoint>"
+    );
+    println!(
+        "  quantumvault-fuse <mountpoint>"
+    );
+    println!();
+    println!("Commands:");
+    println!(
+        "  init <mountpoint>    Initialize vault, set master password and generate PQ keys"
+    );
+    println!(
+        "  <mountpoint>         Mount existing QuantumVault"
+    );
+    println!();
+}
+
+fn mount_vault(mountpoint: String) {
+    println!();
+    println!("QuantumVault filesystem");
+    println!(
+        "Mounting at: {}",
+        mountpoint
+    );
 
     let backing_file =
         PathBuf::from(
@@ -737,12 +872,63 @@ fn main() {
         mountpoint,
         &[
             fuser::MountOption::FSName(
-                "quantumvault".to_string()
+                "quantumvault".to_string(),
             ),
             fuser::MountOption::AutoUnmount,
         ],
     )
     .expect(
-        "Failed to mount FUSE filesystem"
+        "Failed to mount FUSE filesystem",
     );
+}
+
+fn main() {
+    let args: Vec<String> =
+        std::env::args().collect();
+
+    if args.len() < 2 {
+        print_usage();
+        return;
+    }
+
+    if args[1] == "--help"
+        || args[1] == "-h"
+        || args[1] == "help"
+    {
+        print_usage();
+        return;
+    }
+
+    if args[1] == "init" {
+        if args.len() != 3 {
+            println!(
+                "[Rust] ERROR: init requires a mountpoint"
+            );
+
+            print_usage();
+            return;
+        }
+
+        let mountpoint = args[2].clone();
+
+        if !initialize_vault() {
+            println!(
+                "[Rust] ERROR: QuantumVault initialization aborted"
+            );
+
+            return;
+        }
+
+        mount_vault(mountpoint);
+        return;
+    }
+
+    if args.len() == 2 {
+        let mountpoint = args[1].clone();
+
+        mount_vault(mountpoint);
+        return;
+    }
+
+    print_usage();
 }
