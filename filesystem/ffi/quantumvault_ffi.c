@@ -820,3 +820,577 @@ int quantumvault_mldsa_verify_data(
 
     return 0;
 }
+
+/*
+ * ============================================================
+ * QV-26: Persistent Post-Quantum Key Management FFI
+ * ============================================================
+ *
+ * These wrappers expose the liboqs operations needed by Rust.
+ *
+ * Architecture:
+ *
+ * Rust
+ *   |
+ *   v
+ * QuantumVault C FFI
+ *   |
+ *   v
+ * liboqs
+ *
+ * Existing QV-17/QV-18 functions above are intentionally
+ * preserved and are NOT modified.
+ */
+
+/*
+ * QV-26: Generate ML-KEM-768 keypair.
+ *
+ * public_key  -> caller-provided public key buffer
+ * secret_key  -> caller-provided secret key buffer
+ *
+ * The internal liboqs secret-key buffer is locked in RAM while
+ * the keypair is generated and is wiped before returning.
+ */
+int quantumvault_mlkem_generate_keys(
+    uint8_t *public_key,
+    size_t public_key_len,
+    uint8_t *secret_key,
+    size_t secret_key_len)
+{
+    if (!public_key || !secret_key) {
+        printf("[C] QV-26 ERROR: Invalid ML-KEM key buffers\n");
+        return 0;
+    }
+
+    OQS_KEM *kem = OQS_KEM_new("ML-KEM-768");
+
+    if (!kem) {
+        printf("[C] QV-26 ERROR: Failed to initialize ML-KEM-768\n");
+        return 0;
+    }
+
+    if (public_key_len != kem->length_public_key ||
+        secret_key_len != kem->length_secret_key) {
+
+        printf("[C] QV-26 ERROR: Invalid ML-KEM key sizes\n");
+
+        OQS_KEM_free(kem);
+        return 0;
+    }
+
+    uint8_t *internal_secret =
+        OQS_MEM_malloc(kem->length_secret_key);
+
+    if (!internal_secret) {
+        printf("[C] QV-26 ERROR: Secret-key allocation failed\n");
+
+        OQS_KEM_free(kem);
+        return 0;
+    }
+
+    int locked =
+        qv_secure_lock(
+            internal_secret,
+            kem->length_secret_key);
+
+    if (!locked) {
+        printf("[C] QV-26 ERROR: Failed to lock ML-KEM secret key\n");
+
+        OQS_MEM_secure_free(
+            internal_secret,
+            kem->length_secret_key);
+
+        OQS_KEM_free(kem);
+        return 0;
+    }
+
+    printf("[C] QV-26: Generating ML-KEM-768 keypair...\n");
+
+    int result =
+        OQS_KEM_keypair(
+            kem,
+            public_key,
+            internal_secret) == OQS_SUCCESS;
+
+    if (result) {
+        memcpy(
+            secret_key,
+            internal_secret,
+            kem->length_secret_key);
+
+        printf("[C] QV-26: ML-KEM-768 keypair generated successfully\n");
+    } else {
+        printf("[C] QV-26 ERROR: ML-KEM-768 keypair generation failed\n");
+    }
+
+    qv_secure_wipe_unlock(
+        internal_secret,
+        kem->length_secret_key,
+        locked);
+
+    OQS_KEM_free(kem);
+
+    return result;
+}
+
+
+/*
+ * QV-26: ML-KEM-768 encapsulation.
+ *
+ * public_key       -> recipient public key
+ * ciphertext       -> generated KEM ciphertext
+ * shared_secret    -> generated shared secret
+ */
+int quantumvault_mlkem_encapsulate(
+    const uint8_t *public_key,
+    size_t public_key_len,
+    uint8_t *ciphertext,
+    size_t ciphertext_len,
+    uint8_t *shared_secret,
+    size_t shared_secret_len)
+{
+    if (!public_key || !ciphertext || !shared_secret) {
+        printf("[C] QV-26 ERROR: Invalid ML-KEM encapsulation buffers\n");
+        return 0;
+    }
+
+    OQS_KEM *kem = OQS_KEM_new("ML-KEM-768");
+
+    if (!kem) {
+        printf("[C] QV-26 ERROR: Failed to initialize ML-KEM-768\n");
+        return 0;
+    }
+
+    if (public_key_len != kem->length_public_key ||
+        ciphertext_len != kem->length_ciphertext ||
+        shared_secret_len != kem->length_shared_secret) {
+
+        printf("[C] QV-26 ERROR: Invalid ML-KEM encapsulation sizes\n");
+
+        OQS_KEM_free(kem);
+        return 0;
+    }
+
+    uint8_t *internal_shared_secret =
+        OQS_MEM_malloc(kem->length_shared_secret);
+
+    if (!internal_shared_secret) {
+        printf("[C] QV-26 ERROR: Shared-secret allocation failed\n");
+
+        OQS_KEM_free(kem);
+        return 0;
+    }
+
+    int locked =
+        qv_secure_lock(
+            internal_shared_secret,
+            kem->length_shared_secret);
+
+    if (!locked) {
+        printf("[C] QV-26 ERROR: Failed to lock shared secret\n");
+
+        OQS_MEM_secure_free(
+            internal_shared_secret,
+            kem->length_shared_secret);
+
+        OQS_KEM_free(kem);
+        return 0;
+    }
+
+    printf("[C] QV-26: Encapsulating ML-KEM-768 shared secret...\n");
+
+    int result =
+        OQS_KEM_encaps(
+            kem,
+            ciphertext,
+            internal_shared_secret,
+            public_key) == OQS_SUCCESS;
+
+    if (result) {
+        memcpy(
+            shared_secret,
+            internal_shared_secret,
+            kem->length_shared_secret);
+
+        printf("[C] QV-26: ML-KEM encapsulation successful\n");
+    } else {
+        printf("[C] QV-26 ERROR: ML-KEM encapsulation failed\n");
+    }
+
+    qv_secure_wipe_unlock(
+        internal_shared_secret,
+        kem->length_shared_secret,
+        locked);
+
+    OQS_KEM_free(kem);
+
+    return result;
+}
+
+
+/*
+ * QV-26: ML-KEM-768 decapsulation.
+ *
+ * secret_key       -> recipient secret key
+ * ciphertext       -> KEM ciphertext
+ * shared_secret    -> recovered shared secret
+ */
+int quantumvault_mlkem_decapsulate(
+    const uint8_t *secret_key,
+    size_t secret_key_len,
+    const uint8_t *ciphertext,
+    size_t ciphertext_len,
+    uint8_t *shared_secret,
+    size_t shared_secret_len)
+{
+    if (!secret_key || !ciphertext || !shared_secret) {
+        printf("[C] QV-26 ERROR: Invalid ML-KEM decapsulation buffers\n");
+        return 0;
+    }
+
+    OQS_KEM *kem = OQS_KEM_new("ML-KEM-768");
+
+    if (!kem) {
+        printf("[C] QV-26 ERROR: Failed to initialize ML-KEM-768\n");
+        return 0;
+    }
+
+    if (secret_key_len != kem->length_secret_key ||
+        ciphertext_len != kem->length_ciphertext ||
+        shared_secret_len != kem->length_shared_secret) {
+
+        printf("[C] QV-26 ERROR: Invalid ML-KEM decapsulation sizes\n");
+
+        OQS_KEM_free(kem);
+        return 0;
+    }
+
+    uint8_t *internal_secret_key =
+        OQS_MEM_malloc(kem->length_secret_key);
+
+    uint8_t *internal_shared_secret =
+        OQS_MEM_malloc(kem->length_shared_secret);
+
+    if (!internal_secret_key || !internal_shared_secret) {
+        printf("[C] QV-26 ERROR: Decapsulation allocation failed\n");
+
+        if (internal_secret_key) {
+            OQS_MEM_secure_free(
+                internal_secret_key,
+                kem->length_secret_key);
+        }
+
+        if (internal_shared_secret) {
+            OQS_MEM_secure_free(
+                internal_shared_secret,
+                kem->length_shared_secret);
+        }
+
+        OQS_KEM_free(kem);
+        return 0;
+    }
+
+    memcpy(
+        internal_secret_key,
+        secret_key,
+        kem->length_secret_key);
+
+    int secret_locked =
+        qv_secure_lock(
+            internal_secret_key,
+            kem->length_secret_key);
+
+    int shared_locked =
+        qv_secure_lock(
+            internal_shared_secret,
+            kem->length_shared_secret);
+
+    if (!secret_locked || !shared_locked) {
+        printf("[C] QV-26 ERROR: Failed to lock decapsulation buffers\n");
+
+        qv_secure_wipe_unlock(
+            internal_secret_key,
+            kem->length_secret_key,
+            secret_locked);
+
+        qv_secure_wipe_unlock(
+            internal_shared_secret,
+            kem->length_shared_secret,
+            shared_locked);
+
+        OQS_KEM_free(kem);
+        return 0;
+    }
+
+    printf("[C] QV-26: Decapsulating ML-KEM-768 shared secret...\n");
+
+    int result =
+        OQS_KEM_decaps(
+            kem,
+            internal_shared_secret,
+            ciphertext,
+            internal_secret_key) == OQS_SUCCESS;
+
+    if (result) {
+        memcpy(
+            shared_secret,
+            internal_shared_secret,
+            kem->length_shared_secret);
+
+        printf("[C] QV-26: ML-KEM decapsulation successful\n");
+    } else {
+        printf("[C] QV-26 ERROR: ML-KEM decapsulation failed\n");
+    }
+
+    qv_secure_wipe_unlock(
+        internal_secret_key,
+        kem->length_secret_key,
+        secret_locked);
+
+    qv_secure_wipe_unlock(
+        internal_shared_secret,
+        kem->length_shared_secret,
+        shared_locked);
+
+    OQS_KEM_free(kem);
+
+    return result;
+}
+
+
+/*
+ * QV-26: Generate ML-DSA-65 keypair.
+ *
+ * public_key  -> caller-provided public key buffer
+ * secret_key  -> caller-provided secret key buffer
+ */
+int quantumvault_mldsa_generate_keys(
+    uint8_t *public_key,
+    size_t public_key_len,
+    uint8_t *secret_key,
+    size_t secret_key_len)
+{
+    if (!public_key || !secret_key) {
+        printf("[C] QV-26 ERROR: Invalid ML-DSA key buffers\n");
+        return 0;
+    }
+
+    OQS_SIG *sig = OQS_SIG_new("ML-DSA-65");
+
+    if (!sig) {
+        printf("[C] QV-26 ERROR: Failed to initialize ML-DSA-65\n");
+        return 0;
+    }
+
+    if (public_key_len != sig->length_public_key ||
+        secret_key_len != sig->length_secret_key) {
+
+        printf("[C] QV-26 ERROR: Invalid ML-DSA key sizes\n");
+
+        OQS_SIG_free(sig);
+        return 0;
+    }
+
+    uint8_t *internal_secret =
+        OQS_MEM_malloc(sig->length_secret_key);
+
+    if (!internal_secret) {
+        printf("[C] QV-26 ERROR: ML-DSA secret allocation failed\n");
+
+        OQS_SIG_free(sig);
+        return 0;
+    }
+
+    int locked =
+        qv_secure_lock(
+            internal_secret,
+            sig->length_secret_key);
+
+    if (!locked) {
+        printf("[C] QV-26 ERROR: Failed to lock ML-DSA secret key\n");
+
+        OQS_MEM_secure_free(
+            internal_secret,
+            sig->length_secret_key);
+
+        OQS_SIG_free(sig);
+        return 0;
+    }
+
+    printf("[C] QV-26: Generating ML-DSA-65 keypair...\n");
+
+    int result =
+        OQS_SIG_keypair(
+            sig,
+            public_key,
+            internal_secret) == OQS_SUCCESS;
+
+    if (result) {
+        memcpy(
+            secret_key,
+            internal_secret,
+            sig->length_secret_key);
+
+        printf("[C] QV-26: ML-DSA-65 keypair generated successfully\n");
+    } else {
+        printf("[C] QV-26 ERROR: ML-DSA-65 keypair generation failed\n");
+    }
+
+    qv_secure_wipe_unlock(
+        internal_secret,
+        sig->length_secret_key,
+        locked);
+
+    OQS_SIG_free(sig);
+
+    return result;
+}
+
+
+/*
+ * QV-26: Sign data using an existing ML-DSA-65 secret key.
+ *
+ * IMPORTANT:
+ * The caller owns the persistent key material.
+ * The secret key is copied into locked C memory and wiped
+ * immediately after signing.
+ */
+int quantumvault_mldsa_sign_with_key(
+    const uint8_t *data,
+    size_t data_len,
+    const uint8_t *secret_key,
+    size_t secret_key_len,
+    uint8_t *signature,
+    size_t *signature_len)
+{
+    if (!data || !secret_key || !signature || !signature_len) {
+        printf("[C] QV-26 ERROR: Invalid ML-DSA signing arguments\n");
+        return 0;
+    }
+
+    OQS_SIG *sig = OQS_SIG_new("ML-DSA-65");
+
+    if (!sig) {
+        printf("[C] QV-26 ERROR: Failed to initialize ML-DSA-65\n");
+        return 0;
+    }
+
+    if (secret_key_len != sig->length_secret_key) {
+        printf("[C] QV-26 ERROR: Invalid ML-DSA secret-key size\n");
+
+        OQS_SIG_free(sig);
+        return 0;
+    }
+
+    uint8_t *internal_secret =
+        OQS_MEM_malloc(sig->length_secret_key);
+
+    if (!internal_secret) {
+        printf("[C] QV-26 ERROR: Secret-key allocation failed\n");
+
+        OQS_SIG_free(sig);
+        return 0;
+    }
+
+    memcpy(
+        internal_secret,
+        secret_key,
+        sig->length_secret_key);
+
+    int locked =
+        qv_secure_lock(
+            internal_secret,
+            sig->length_secret_key);
+
+    if (!locked) {
+        printf("[C] QV-26 ERROR: Failed to lock signing key\n");
+
+        OQS_MEM_secure_free(
+            internal_secret,
+            sig->length_secret_key);
+
+        OQS_SIG_free(sig);
+        return 0;
+    }
+
+    printf("[C] QV-26: Signing data with persistent ML-DSA-65 key...\n");
+
+    int result =
+        OQS_SIG_sign(
+            sig,
+            signature,
+            signature_len,
+            data,
+            data_len,
+            internal_secret) == OQS_SUCCESS;
+
+    if (result) {
+        printf("[C] QV-26: ML-DSA-65 signing successful\n");
+        printf("[C] QV-26: Signature size: %zu bytes\n",
+               *signature_len);
+    } else {
+        printf("[C] QV-26 ERROR: ML-DSA-65 signing failed\n");
+    }
+
+    qv_secure_wipe_unlock(
+        internal_secret,
+        sig->length_secret_key,
+        locked);
+
+    OQS_SIG_free(sig);
+
+    return result;
+}
+
+
+/*
+ * QV-26: Verify data using an existing ML-DSA-65 public key.
+ */
+int quantumvault_mldsa_verify_with_key(
+    const uint8_t *data,
+    size_t data_len,
+    const uint8_t *public_key,
+    size_t public_key_len,
+    const uint8_t *signature,
+    size_t signature_len)
+{
+    if (!data || !public_key || !signature || signature_len == 0) {
+        printf("[C] QV-26 ERROR: Invalid ML-DSA verification arguments\n");
+        return 0;
+    }
+
+    OQS_SIG *sig = OQS_SIG_new("ML-DSA-65");
+
+    if (!sig) {
+        printf("[C] QV-26 ERROR: Failed to initialize ML-DSA-65\n");
+        return 0;
+    }
+
+    if (public_key_len != sig->length_public_key) {
+        printf("[C] QV-26 ERROR: Invalid ML-DSA public-key size\n");
+
+        OQS_SIG_free(sig);
+        return 0;
+    }
+
+    printf("[C] QV-26: Verifying ML-DSA-65 signature...\n");
+
+    int result =
+        OQS_SIG_verify(
+            sig,
+            data,
+            data_len,
+            signature,
+            signature_len,
+            public_key) == OQS_SUCCESS;
+
+    if (result) {
+        printf("[C] QV-26: ML-DSA-65 signature verification successful\n");
+    } else {
+        printf("[C] QV-26 ERROR: ML-DSA-65 signature verification failed\n");
+    }
+
+    OQS_SIG_free(sig);
+
+    return result;
+}
