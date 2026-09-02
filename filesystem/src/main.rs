@@ -11,6 +11,7 @@ use fuser::{
 
 use libc::{EIO, ENOENT};
 
+use rand::RngCore;
 use rpassword::read_password;
 use sha2::{Digest, Sha256};
 
@@ -47,37 +48,112 @@ const TTL: Duration = Duration::from_secs(1);
 const ROOT_INO: u64 = 1;
 const HELLO_INO: u64 = 2;
 
-const ENCRYPTION_KEY: [u8; 32] = [0x42; 32];
-const ENCRYPTION_NONCE: [u8; 12] = *b"QVNonce12345";
+/*
+ * AES-GCM uses a 12-byte nonce.
+ *
+ * The nonce is now generated randomly for every write
+ * and stored at the beginning of the encrypted backing file.
+ */
+const AES_NONCE_SIZE: usize = 12;
 
 const SIGNATURE_FILE: &str = "/tmp/quantumvault_signature.bin";
+
 const MASTER_PASSWORD_HASH_FILE: &str =
     "/tmp/quantumvault_master_password.sha256";
 
 const SIGNATURE_MAGIC: &[u8; 4] = b"QV20";
+
 const SIGNATURE_HEADER_SIZE: usize = 12;
 
 struct QuantumVaultFS {
     backing_file: PathBuf,
+
+    /*
+     * AES-256 encryption key derived from the
+     * authenticated master password.
+     */
+    encryption_key: [u8; 32],
 }
 
 impl QuantumVaultFS {
+    /*
+     * QV-25
+     *
+     * Encrypt plaintext using AES-256-GCM.
+     *
+     * A fresh random nonce is generated for every write.
+     *
+     * Backing-file format:
+     *
+     * [12-byte nonce][AES-GCM ciphertext + authentication tag]
+     */
     fn encrypt_data(&self, plaintext: &[u8]) -> Result<Vec<u8>, ()> {
-        let key = Key::<Aes256Gcm>::from_slice(&ENCRYPTION_KEY);
+        let key =
+            Key::<Aes256Gcm>::from_slice(&self.encryption_key);
+
         let cipher = Aes256Gcm::new(key);
 
-        let nonce = Nonce::from_slice(&ENCRYPTION_NONCE);
+        let mut nonce_bytes = [0u8; AES_NONCE_SIZE];
 
-        cipher
-            .encrypt(nonce, plaintext)
-            .map_err(|_| ())
+        rand::rng().fill_bytes(&mut nonce_bytes);
+
+        let nonce =
+            Nonce::from_slice(&nonce_bytes);
+
+        let ciphertext =
+            cipher
+                .encrypt(nonce, plaintext)
+                .map_err(|_| ())?;
+
+        let mut output =
+            Vec::with_capacity(
+                AES_NONCE_SIZE + ciphertext.len(),
+            );
+
+        output.extend_from_slice(&nonce_bytes);
+
+        output.extend_from_slice(&ciphertext);
+
+        println!(
+            "[Rust] QV-25: Random AES-GCM nonce generated"
+        );
+
+        println!(
+            "[Rust] QV-25: AES-256-GCM encryption completed"
+        );
+
+        Ok(output)
     }
 
-    fn decrypt_data(&self, ciphertext: &[u8]) -> Result<Vec<u8>, ()> {
-        let key = Key::<Aes256Gcm>::from_slice(&ENCRYPTION_KEY);
+    /*
+     * QV-25
+     *
+     * Decrypt backing-file data.
+     *
+     * The first 12 bytes contain the random AES-GCM nonce.
+     */
+    fn decrypt_data(&self, encrypted_data: &[u8]) -> Result<Vec<u8>, ()> {
+        if encrypted_data.len() <= AES_NONCE_SIZE {
+            println!(
+                "[Rust] QV-25 ERROR: Encrypted data is too small"
+            );
+
+            return Err(());
+        }
+
+        let nonce_bytes =
+            &encrypted_data[..AES_NONCE_SIZE];
+
+        let ciphertext =
+            &encrypted_data[AES_NONCE_SIZE..];
+
+        let key =
+            Key::<Aes256Gcm>::from_slice(&self.encryption_key);
+
         let cipher = Aes256Gcm::new(key);
 
-        let nonce = Nonce::from_slice(&ENCRYPTION_NONCE);
+        let nonce =
+            Nonce::from_slice(nonce_bytes);
 
         cipher
             .decrypt(nonce, ciphertext)
@@ -420,7 +496,8 @@ impl Filesystem for QuantumVaultFS {
                     "[Rust] QV-19: ML-DSA-65 signature verification successful"
                 );
 
-                let start = offset.max(0) as usize;
+                let start =
+                    offset.max(0) as usize;
 
                 if start >= plaintext.len() {
                     reply.data(&[]);
@@ -438,6 +515,10 @@ impl Filesystem for QuantumVaultFS {
             Err(_) => {
                 println!(
                     "[Rust] ERROR: AES-GCM decryption failed"
+                );
+
+                println!(
+                    "[Rust] ERROR: Vault password may be incorrect or backing data is invalid"
                 );
 
                 reply.error(EIO);
@@ -472,6 +553,12 @@ impl Filesystem for QuantumVaultFS {
             offset
         );
 
+        /*
+         * QV-17
+         *
+         * Generate ML-DSA-65 signature before storing
+         * the plaintext in encrypted backing storage.
+         */
         println!(
             "[Rust] QV-17: Generating ML-DSA-65 signature..."
         );
@@ -498,6 +585,15 @@ impl Filesystem for QuantumVaultFS {
             signature.len()
         );
 
+        /*
+         * QV-20
+         *
+         * Signature evidence format:
+         *
+         * [4-byte magic]
+         * [8-byte plaintext length]
+         * [ML-DSA-65 signature]
+         */
         let mut signature_evidence =
             Vec::with_capacity(
                 SIGNATURE_HEADER_SIZE
@@ -518,6 +614,61 @@ impl Filesystem for QuantumVaultFS {
             "[Rust] QV-20: Signature evidence prepared"
         );
 
+        /*
+         * QV-25
+         *
+         * Encrypt first.
+         *
+         * This prevents signature evidence from being
+         * updated if encryption fails.
+         */
+        let encrypted_data =
+            match self.encrypt_data(data) {
+                Ok(encrypted_data) => encrypted_data,
+
+                Err(_) => {
+                    println!(
+                        "[Rust] ERROR: AES-GCM encryption failed"
+                    );
+
+                    reply.error(EIO);
+                    return;
+                }
+            };
+
+        /*
+         * Write encrypted backing data.
+         */
+        let write_result = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&self.backing_file)
+            .and_then(|mut file| {
+                file.write_all(&encrypted_data)?;
+                file.flush()?;
+                Ok(())
+            });
+
+        if let Err(error) = write_result {
+            println!(
+                "[Rust] ERROR: Encrypted write failed: {}",
+                error
+            );
+
+            reply.error(EIO);
+            return;
+        }
+
+        println!(
+            "[Rust] Encrypted data written to: {}",
+            self.backing_file.display()
+        );
+
+        /*
+         * Write ML-DSA signature evidence only after
+         * successful encryption.
+         */
         let signature_write_result =
             OpenOptions::new()
                 .create(true)
@@ -542,6 +693,11 @@ impl Filesystem for QuantumVaultFS {
                 error
             );
 
+            /*
+             * Do not leave inconsistent vault state.
+             */
+            let _ = self.clear_backing_file();
+
             reply.error(EIO);
             return;
         }
@@ -551,58 +707,15 @@ impl Filesystem for QuantumVaultFS {
             SIGNATURE_FILE
         );
 
-        let ciphertext =
-            match self.encrypt_data(data) {
-                Ok(ciphertext) => ciphertext,
-
-                Err(_) => {
-                    println!(
-                        "[Rust] ERROR: AES-GCM encryption failed"
-                    );
-
-                    reply.error(EIO);
-                    return;
-                }
-            };
-
         println!(
-            "[Rust] AES-GCM encryption successful"
+            "[Rust] QV-17: Digital signature + encryption completed"
         );
 
-        let write_result = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&self.backing_file)
-            .and_then(|mut file| {
-                file.write_all(&ciphertext)?;
-                file.flush()?;
-                Ok(())
-            });
+        println!(
+            "[Rust] QV-25: Random nonce + password-derived AES key used"
+        );
 
-        match write_result {
-            Ok(()) => {
-                println!(
-                    "[Rust] Encrypted data written to: {}",
-                    self.backing_file.display()
-                );
-
-                println!(
-                    "[Rust] QV-17: Digital signature + encryption completed"
-                );
-
-                reply.written(data.len() as u32);
-            }
-
-            Err(error) => {
-                println!(
-                    "[Rust] ERROR: Encrypted write failed: {}",
-                    error
-                );
-
-                reply.error(EIO);
-            }
-        }
+        reply.written(data.len() as u32);
     }
 }
 
@@ -647,9 +760,9 @@ fn hello_attr() -> FileAttr {
 }
 
 /*
- * QV-22
+ * QV-22 / QV-25
  *
- * Hash the master password with SHA-256.
+ * SHA-256 hash of the master password.
  *
  * The plaintext password is never written to disk.
  */
@@ -667,15 +780,44 @@ fn hash_master_password(password: &str) -> String {
 }
 
 /*
+ * QV-25
+ *
+ * Derive the AES-256 encryption key from the
+ * master password.
+ *
+ * A domain-separation prefix ensures this hash
+ * is used specifically for the QuantumVault
+ * encryption-key purpose.
+ */
+fn derive_encryption_key(password: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+
+    hasher.update(
+        b"QuantumVault-AES-256-GCM-Key:",
+    );
+
+    hasher.update(password.as_bytes());
+
+    let digest = hasher.finalize();
+
+    let mut key = [0u8; 32];
+
+    key.copy_from_slice(&digest);
+
+    key
+}
+
+/*
  * QV-22
  *
- * Create the vault master-password hash.
+ * Create the vault master-password hash and
+ * return the derived encryption key.
  */
-fn setup_master_password() -> Result<(), ()> {
+fn setup_master_password() -> Result<[u8; 32], ()> {
     println!();
-    println!("======================================");
-    println!(" QuantumVault QV-22 Initialization");
-    println!("======================================");
+    println!("==============================================");
+    println!("------- QuantumVault  Initialization  --------");
+    println!("==============================================");
     println!();
 
     println!("Set master password:");
@@ -707,6 +849,9 @@ fn setup_master_password() -> Result<(), ()> {
     let password_hash =
         hash_master_password(&password);
 
+    let encryption_key =
+        derive_encryption_key(&password);
+
     let mut file = OpenOptions::new()
         .create(true)
         .write(true)
@@ -714,8 +859,10 @@ fn setup_master_password() -> Result<(), ()> {
         .open(MASTER_PASSWORD_HASH_FILE)
         .map_err(|_| ())?;
 
-    file.write_all(password_hash.as_bytes())
-        .map_err(|_| ())?;
+    file.write_all(
+        password_hash.as_bytes()
+    )
+    .map_err(|_| ())?;
 
     file.flush().map_err(|_| ())?;
 
@@ -728,7 +875,62 @@ fn setup_master_password() -> Result<(), ()> {
         MASTER_PASSWORD_HASH_FILE
     );
 
-    Ok(())
+    println!(
+        "[Rust] QV-25: AES-256 encryption key derived from master password"
+    );
+
+    Ok(encryption_key)
+}
+
+/*
+ * QV-25
+ *
+ * Authenticate an existing vault master password.
+ *
+ * The supplied password is hashed and compared with
+ * the stored password hash.
+ */
+fn unlock_vault() -> Result<[u8; 32], ()> {
+    println!();
+    println!("======================================");
+    println!(" QuantumVault Vault Unlock");
+    println!("======================================");
+    println!();
+
+    println!("Enter master password:");
+
+    let password =
+        read_password().map_err(|_| ())?;
+
+    let stored_hash =
+        fs::read_to_string(
+            MASTER_PASSWORD_HASH_FILE
+        )
+        .map_err(|_| ())?;
+
+    let supplied_hash =
+        hash_master_password(&password);
+
+    if stored_hash.trim() != supplied_hash {
+        println!(
+            "[Rust] ERROR: Master password authentication failed"
+        );
+
+        return Err(());
+    }
+
+    println!(
+        "[Rust] QV-25: Master password authentication successful"
+    );
+
+    let encryption_key =
+        derive_encryption_key(&password);
+
+    println!(
+        "[Rust] QV-25: Vault encryption key derived successfully"
+    );
+
+    Ok(encryption_key)
 }
 
 /*
@@ -790,26 +992,21 @@ fn generate_post_quantum_keys() -> bool {
     true
 }
 
-fn initialize_vault() -> bool {
+fn initialize_vault() -> Result<[u8; 32], ()> {
     println!();
     println!("--------------------------------------");
     println!(" QuantumVault Vault Initialization");
     println!("--------------------------------------");
 
-    if setup_master_password().is_err() {
-        println!(
-            "[Rust] ERROR: Vault initialization failed"
-        );
-
-        return false;
-    }
+    let encryption_key =
+        setup_master_password()?;
 
     if !generate_post_quantum_keys() {
         println!(
             "[Rust] ERROR: Post-quantum key setup failed"
         );
 
-        return false;
+        return Err(());
     }
 
     println!();
@@ -817,12 +1014,16 @@ fn initialize_vault() -> bool {
         "[Rust] QV-22: Vault initialization completed successfully"
     );
 
-    true
+    println!(
+        "[Rust] QV-25: Password-based encryption protection enabled"
+    );
+
+    Ok(encryption_key)
 }
 
 fn print_usage() {
     println!();
-    println!("QuantumVault QV-22");
+    println!("QuantumVault QV-25");
     println!();
     println!("Usage:");
     println!(
@@ -837,14 +1038,18 @@ fn print_usage() {
         "  init <mountpoint>    Initialize vault, set master password and generate PQ keys"
     );
     println!(
-        "  <mountpoint>         Mount existing QuantumVault"
+        "  <mountpoint>         Unlock and mount existing QuantumVault"
     );
     println!();
 }
 
-fn mount_vault(mountpoint: String) {
+fn mount_vault(
+    mountpoint: String,
+    encryption_key: [u8; 32],
+) {
     println!();
     println!("QuantumVault filesystem");
+
     println!(
         "Mounting at: {}",
         mountpoint
@@ -865,9 +1070,14 @@ fn mount_vault(mountpoint: String) {
         SIGNATURE_FILE
     );
 
+    println!(
+        "[Rust] QV-25: Using authenticated password-derived AES-256 key"
+    );
+
     fuser::mount2(
         QuantumVaultFS {
             backing_file,
+            encryption_key,
         },
         mountpoint,
         &[
@@ -909,24 +1119,52 @@ fn main() {
             return;
         }
 
-        let mountpoint = args[2].clone();
+        let mountpoint =
+            args[2].clone();
 
-        if !initialize_vault() {
-            println!(
-                "[Rust] ERROR: QuantumVault initialization aborted"
-            );
+        let encryption_key =
+            match initialize_vault() {
+                Ok(key) => key,
 
-            return;
-        }
+                Err(_) => {
+                    println!(
+                        "[Rust] ERROR: QuantumVault initialization aborted"
+                    );
 
-        mount_vault(mountpoint);
+                    return;
+                }
+            };
+
+        mount_vault(
+            mountpoint,
+            encryption_key,
+        );
+
         return;
     }
 
     if args.len() == 2 {
-        let mountpoint = args[1].clone();
+        let mountpoint =
+            args[1].clone();
 
-        mount_vault(mountpoint);
+        let encryption_key =
+            match unlock_vault() {
+                Ok(key) => key,
+
+                Err(_) => {
+                    println!(
+                        "[Rust] ERROR: QuantumVault unlock failed"
+                    );
+
+                    return;
+                }
+            };
+
+        mount_vault(
+            mountpoint,
+            encryption_key,
+        );
+
         return;
     }
 

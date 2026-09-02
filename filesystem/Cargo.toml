@@ -9,6 +9,7 @@ fuser = "0.16"
 libc = "0.2"
 sha2 = "0.10"
 rpassword = "7"
+rand = "0.9"
 
 [build-dependencies]
 cc = "1"
