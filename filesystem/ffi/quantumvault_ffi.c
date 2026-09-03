@@ -6,6 +6,12 @@
 #include <errno.h>
 #include <oqs/oqs.h>
 
+/* QuantumVault FFI logging policy */
+#define QV_INFO(...) ((void)0)
+#define QV_ERROR(...) fprintf(stderr, "ERROR: " __VA_ARGS__)
+#define QV_WARNING(...) fprintf(stderr, "WARNING: " __VA_ARGS__)
+
+
 #define QV_PUBLIC_KEY_FILE "/tmp/quantumvault_mldsa_public_key.bin"
 
 /*
@@ -22,12 +28,12 @@ static int qv_secure_lock(void *buffer, size_t length)
  }
 
  if (mlock(buffer, length) != 0) {
- printf("[C] ERROR: mlock failed: %s\n",
+ QV_ERROR("mlock failed: %s\n",
  strerror(errno));
  return 0;
  }
 
- printf("[C] : Sensitive memory locked with mlock()\n");
+ QV_INFO("[C] : Sensitive memory locked with mlock()\n");
 
  return 1;
 }
@@ -43,14 +49,14 @@ static void qv_secure_wipe_unlock(
 
  explicit_bzero(buffer, length);
 
- printf("[C] : Sensitive memory wiped with explicit_bzero()\n");
+ QV_INFO("[C] : Sensitive memory wiped with explicit_bzero()\n");
 
  if (locked) {
  if (munlock(buffer, length) != 0) {
- printf("[C] WARNING: munlock failed: %s\n",
+ QV_WARNING("munlock failed: %s\n",
  strerror(errno));
  } else {
- printf("[C] : Sensitive memory unlocked\n");
+ QV_INFO("[C] : Sensitive memory unlocked\n");
  }
  }
 
@@ -75,23 +81,23 @@ int quantumvault_ffi_test(void)
  int shared_secret_enc_locked = 0;
  int shared_secret_dec_locked = 0;
 
- printf("[C] Initializing ML-KEM-768...\n");
+ QV_INFO("[C] Initializing ML-KEM-768...\n");
 
  kem = OQS_KEM_new("ML-KEM-768");
 
  if (kem == NULL) {
- printf("[C] ERROR: Failed to initialize ML-KEM-768\n");
+ QV_ERROR("Failed to initialize ML-KEM-768\n");
  return 0;
  }
 
- printf("[C] ML-KEM-768 initialized successfully\n");
- printf("[C] Public key size: %zu bytes\n",
+ QV_INFO("[C] ML-KEM-768 initialized successfully\n");
+ QV_INFO("[C] Public key size: %zu bytes\n",
  kem->length_public_key);
- printf("[C] Secret key size: %zu bytes\n",
+ QV_INFO("[C] Secret key size: %zu bytes\n",
  kem->length_secret_key);
- printf("[C] Ciphertext size: %zu bytes\n",
+ QV_INFO("[C] Ciphertext size: %zu bytes\n",
  kem->length_ciphertext);
- printf("[C] Shared secret size: %zu bytes\n",
+ QV_INFO("[C] Shared secret size: %zu bytes\n",
  kem->length_shared_secret);
 
  public_key =
@@ -112,7 +118,7 @@ int quantumvault_ffi_test(void)
  if (!public_key || !secret_key || !ciphertext ||
  !shared_secret_enc || !shared_secret_dec) {
 
- printf("[C] ERROR: Memory allocation failed\n");
+ QV_ERROR("Memory allocation failed\n");
  goto kem_cleanup_failure;
  }
 
@@ -125,7 +131,7 @@ int quantumvault_ffi_test(void)
  secret_key,
  kem->length_secret_key)) {
 
- printf("[C] ERROR: Failed to lock ML-KEM secret key\n");
+ QV_ERROR("Failed to lock ML-KEM secret key\n");
  goto kem_cleanup_failure;
  }
 
@@ -135,7 +141,7 @@ int quantumvault_ffi_test(void)
  shared_secret_enc,
  kem->length_shared_secret)) {
 
- printf("[C] ERROR: Failed to lock encapsulated shared secret\n");
+ QV_ERROR("Failed to lock encapsulated shared secret\n");
  goto kem_cleanup_failure;
  }
 
@@ -145,28 +151,28 @@ int quantumvault_ffi_test(void)
  shared_secret_dec,
  kem->length_shared_secret)) {
 
- printf("[C] ERROR: Failed to lock decapsulated shared secret\n");
+ QV_ERROR("Failed to lock decapsulated shared secret\n");
  goto kem_cleanup_failure;
  }
 
  shared_secret_dec_locked = 1;
 
- printf("[C] : ML-KEM sensitive buffers secured\n");
+ QV_INFO("[C] : ML-KEM sensitive buffers secured\n");
 
- printf("[C] Generating ML-KEM-768 keypair...\n");
+ QV_INFO("[C] Generating ML-KEM-768 keypair...\n");
 
  if (OQS_KEM_keypair(
  kem,
  public_key,
  secret_key) != OQS_SUCCESS) {
 
- printf("[C] ERROR: Keypair generation failed\n");
+ QV_ERROR("Keypair generation failed\n");
  goto kem_cleanup_failure;
  }
 
- printf("[C] Keypair generated successfully\n");
+ QV_INFO("[C] Keypair generated successfully\n");
 
- printf("[C] Encapsulating shared secret...\n");
+ QV_INFO("[C] Encapsulating shared secret...\n");
 
  if (OQS_KEM_encaps(
  kem,
@@ -174,13 +180,13 @@ int quantumvault_ffi_test(void)
  shared_secret_enc,
  public_key) != OQS_SUCCESS) {
 
- printf("[C] ERROR: Encapsulation failed\n");
+ QV_ERROR("Encapsulation failed\n");
  goto kem_cleanup_failure;
  }
 
- printf("[C] Encapsulation successful\n");
+ QV_INFO("[C] Encapsulation successful\n");
 
- printf("[C] Decapsulating shared secret...\n");
+ QV_INFO("[C] Decapsulating shared secret...\n");
 
  if (OQS_KEM_decaps(
  kem,
@@ -188,23 +194,23 @@ int quantumvault_ffi_test(void)
  ciphertext,
  secret_key) != OQS_SUCCESS) {
 
- printf("[C] ERROR: Decapsulation failed\n");
+ QV_ERROR("Decapsulation failed\n");
  goto kem_cleanup_failure;
  }
 
- printf("[C] Decapsulation successful\n");
+ QV_INFO("[C] Decapsulation successful\n");
 
  if (memcmp(
  shared_secret_enc,
  shared_secret_dec,
  kem->length_shared_secret) != 0) {
 
- printf("[C] ERROR: Shared secrets DO NOT match\n");
+ QV_ERROR("Shared secrets DO NOT match\n");
  goto kem_cleanup_failure;
  }
 
- printf("[C] SUCCESS: Shared secrets match!\n");
- printf("[C] ML-KEM-768 key encapsulation cycle completed successfully\n");
+ QV_INFO("[C] SUCCESS: Shared secrets match!\n");
+ QV_INFO("[C] ML-KEM-768 key encapsulation cycle completed successfully\n");
 
  /*
  * secure cleanup.
@@ -312,24 +318,24 @@ int quantumvault_mldsa_test(void)
 
  int result = 0;
 
- printf("[C] Initializing ML-DSA-65...\n");
+ QV_INFO("[C] Initializing ML-DSA-65...\n");
 
  sig = OQS_SIG_new("ML-DSA-65");
 
  if (sig == NULL) {
- printf("[C] ERROR: Failed to initialize ML-DSA-65\n");
+ QV_ERROR("Failed to initialize ML-DSA-65\n");
  return 0;
  }
 
- printf("[C] ML-DSA-65 initialized successfully\n");
+ QV_INFO("[C] ML-DSA-65 initialized successfully\n");
 
- printf("[C] Public key size: %zu bytes\n",
+ QV_INFO("[C] Public key size: %zu bytes\n",
  sig->length_public_key);
 
- printf("[C] Secret key size: %zu bytes\n",
+ QV_INFO("[C] Secret key size: %zu bytes\n",
  sig->length_secret_key);
 
- printf("[C] Signature size: %zu bytes\n",
+ QV_INFO("[C] Signature size: %zu bytes\n",
  sig->length_signature);
 
  public_key =
@@ -343,7 +349,7 @@ int quantumvault_mldsa_test(void)
 
  if (!public_key || !secret_key || !signature) {
 
- printf("[C] ERROR: ML-DSA memory allocation failed\n");
+ QV_ERROR("ML-DSA memory allocation failed\n");
  goto mldsa_test_cleanup;
  }
 
@@ -356,28 +362,28 @@ int quantumvault_mldsa_test(void)
  secret_key,
  sig->length_secret_key)) {
 
- printf("[C] ERROR: Failed to lock ML-DSA secret key\n");
+ QV_ERROR("Failed to lock ML-DSA secret key\n");
  goto mldsa_test_cleanup;
  }
 
  secret_key_locked = 1;
 
- printf("[C] : ML-DSA secret key secured\n");
+ QV_INFO("[C] : ML-DSA secret key secured\n");
 
- printf("[C] Generating ML-DSA-65 keypair...\n");
+ QV_INFO("[C] Generating ML-DSA-65 keypair...\n");
 
  if (OQS_SIG_keypair(
  sig,
  public_key,
  secret_key) != OQS_SUCCESS) {
 
- printf("[C] ERROR: ML-DSA keypair generation failed\n");
+ QV_ERROR("ML-DSA keypair generation failed\n");
  goto mldsa_test_cleanup;
  }
 
- printf("[C] Keypair generated successfully\n");
+ QV_INFO("[C] Keypair generated successfully\n");
 
- printf("[C] Signing message...\n");
+ QV_INFO("[C] Signing message...\n");
 
  if (OQS_SIG_sign(
  sig,
@@ -387,16 +393,16 @@ int quantumvault_mldsa_test(void)
  sizeof(message) - 1,
  secret_key) != OQS_SUCCESS) {
 
- printf("[C] ERROR: ML-DSA signature generation failed\n");
+ QV_ERROR("ML-DSA signature generation failed\n");
  goto mldsa_test_cleanup;
  }
 
- printf("[C] Signature generated successfully\n");
+ QV_INFO("[C] Signature generated successfully\n");
 
- printf("[C] Signature size: %zu bytes\n",
+ QV_INFO("[C] Signature size: %zu bytes\n",
  signature_len);
 
- printf("[C] Verifying signature...\n");
+ QV_INFO("[C] Verifying signature...\n");
 
  if (OQS_SIG_verify(
  sig,
@@ -406,13 +412,13 @@ int quantumvault_mldsa_test(void)
  signature_len,
  public_key) != OQS_SUCCESS) {
 
- printf("[C] ERROR: Signature verification failed\n");
+ QV_ERROR("Signature verification failed\n");
  goto mldsa_test_cleanup;
  }
 
- printf("[C] Signature verification successful\n");
+ QV_INFO("[C] Signature verification successful\n");
 
- printf("[C] Testing tampered message...\n");
+ QV_INFO("[C] Testing tampered message...\n");
 
  if (OQS_SIG_verify(
  sig,
@@ -422,13 +428,13 @@ int quantumvault_mldsa_test(void)
  signature_len,
  public_key) == OQS_SUCCESS) {
 
- printf("[C] ERROR: Tampered message was accepted\n");
+ QV_ERROR("Tampered message was accepted\n");
  goto mldsa_test_cleanup;
  }
 
- printf("[C] Tampered message rejected successfully\n");
+ QV_INFO("[C] Tampered message rejected successfully\n");
 
- printf("[C] ML-DSA-65 FFI test completed successfully\n");
+ QV_INFO("[C] ML-DSA-65 FFI test completed successfully\n");
 
  result = 1;
 
@@ -474,7 +480,7 @@ int quantumvault_mldsa_sign_data(
 {
  if (!data || !signature || !signature_len) {
 
- printf("[C] ERROR: Invalid ML-DSA signing arguments\n");
+ QV_ERROR("Invalid ML-DSA signing arguments\n");
  return 0;
  }
 
@@ -483,7 +489,7 @@ int quantumvault_mldsa_sign_data(
 
  if (sig == NULL) {
 
- printf("[C] ERROR: Failed to initialize ML-DSA-65 signer\n");
+ QV_ERROR("Failed to initialize ML-DSA-65 signer\n");
  return 0;
  }
 
@@ -497,7 +503,7 @@ int quantumvault_mldsa_sign_data(
 
  if (!public_key || !secret_key) {
 
- printf("[C] ERROR: Signing key allocation failed\n");
+ QV_ERROR("Signing key allocation failed\n");
 
  if (public_key) {
  OQS_MEM_secure_free(
@@ -525,7 +531,7 @@ int quantumvault_mldsa_sign_data(
  secret_key,
  sig->length_secret_key)) {
 
- printf("[C] ERROR: Failed to lock signing secret key\n");
+ QV_ERROR("Failed to lock signing secret key\n");
 
  OQS_MEM_secure_free(
  public_key,
@@ -542,16 +548,16 @@ int quantumvault_mldsa_sign_data(
 
  secret_key_locked = 1;
 
- printf("[C] : ML-DSA signing secret key secured\n");
+ QV_INFO("[C] : ML-DSA signing secret key secured\n");
 
- printf("[C] : Generating ML-DSA-65 signing keypair...\n");
+ QV_INFO("[C] : Generating ML-DSA-65 signing keypair...\n");
 
  if (OQS_SIG_keypair(
  sig,
  public_key,
  secret_key) != OQS_SUCCESS) {
 
- printf("[C] ERROR: keypair generation failed\n");
+ QV_ERROR("keypair generation failed\n");
 
  qv_secure_wipe_unlock(
  secret_key,
@@ -567,7 +573,7 @@ int quantumvault_mldsa_sign_data(
  return 0;
  }
 
- printf("[C] : Keypair generated successfully\n");
+ QV_INFO("[C] : Keypair generated successfully\n");
 
  /*
  * :
@@ -580,7 +586,7 @@ int quantumvault_mldsa_sign_data(
 
  if (!key_file) {
 
- printf("[C] ERROR: Failed to create public key evidence\n");
+ QV_ERROR("Failed to create public key evidence\n");
 
  qv_secure_wipe_unlock(
  secret_key,
@@ -607,7 +613,7 @@ int quantumvault_mldsa_sign_data(
 
  if (key_written != sig->length_public_key) {
 
- printf("[C] ERROR: Failed to write public key evidence\n");
+ QV_ERROR("Failed to write public key evidence\n");
 
  qv_secure_wipe_unlock(
  secret_key,
@@ -623,12 +629,12 @@ int quantumvault_mldsa_sign_data(
  return 0;
  }
 
- printf("[C] : ML-DSA public key evidence saved\n");
+ QV_INFO("[C] : ML-DSA public key evidence saved\n");
 
- printf("[C] : Public key size: %zu bytes\n",
+ QV_INFO("[C] : Public key size: %zu bytes\n",
  sig->length_public_key);
 
- printf("[C] : Signing vault data...\n");
+ QV_INFO("[C] : Signing vault data...\n");
 
  if (OQS_SIG_sign(
  sig,
@@ -638,7 +644,7 @@ int quantumvault_mldsa_sign_data(
  data_len,
  secret_key) != OQS_SUCCESS) {
 
- printf("[C] ERROR: signature generation failed\n");
+ QV_ERROR("signature generation failed\n");
 
  qv_secure_wipe_unlock(
  secret_key,
@@ -654,9 +660,9 @@ int quantumvault_mldsa_sign_data(
  return 0;
  }
 
- printf("[C] : Vault data signed successfully\n");
+ QV_INFO("[C] : Vault data signed successfully\n");
 
- printf("[C] : Signature size: %zu bytes\n",
+ QV_INFO("[C] : Signature size: %zu bytes\n",
  *signature_len);
 
  /*
@@ -672,7 +678,7 @@ int quantumvault_mldsa_sign_data(
  *signature_len,
  public_key) != OQS_SUCCESS) {
 
- printf("[C] ERROR: Immediate signature verification failed\n");
+ QV_ERROR("Immediate signature verification failed\n");
 
  qv_secure_wipe_unlock(
  secret_key,
@@ -688,7 +694,7 @@ int quantumvault_mldsa_sign_data(
  return 0;
  }
 
- printf("[C] : Signature verified successfully after signing\n");
+ QV_INFO("[C] : Signature verified successfully after signing\n");
 
  /*
  * secure cleanup.
@@ -721,7 +727,7 @@ int quantumvault_mldsa_verify_data(
 {
  if (!data || !signature || signature_len == 0) {
 
- printf("[C] ERROR: Invalid verification arguments\n");
+ QV_ERROR("Invalid verification arguments\n");
 
  return 0;
  }
@@ -731,7 +737,7 @@ int quantumvault_mldsa_verify_data(
 
  if (sig == NULL) {
 
- printf("[C] ERROR: Failed to initialize ML-DSA-65 verifier\n");
+ QV_ERROR("Failed to initialize ML-DSA-65 verifier\n");
 
  return 0;
  }
@@ -741,7 +747,7 @@ int quantumvault_mldsa_verify_data(
 
  if (!public_key) {
 
- printf("[C] ERROR: Public key allocation failed\n");
+ QV_ERROR("Public key allocation failed\n");
 
  OQS_SIG_free(sig);
 
@@ -753,7 +759,7 @@ int quantumvault_mldsa_verify_data(
 
  if (!key_file) {
 
- printf("[C] ERROR: Public key evidence not found\n");
+ QV_ERROR("Public key evidence not found\n");
 
  OQS_MEM_secure_free(
  public_key,
@@ -775,7 +781,7 @@ int quantumvault_mldsa_verify_data(
 
  if (key_read != sig->length_public_key) {
 
- printf("[C] ERROR: Invalid public key evidence\n");
+ QV_ERROR("Invalid public key evidence\n");
 
  OQS_MEM_secure_free(
  public_key,
@@ -786,7 +792,7 @@ int quantumvault_mldsa_verify_data(
  return 0;
  }
 
- printf("[C] : Verifying ML-DSA-65 signature...\n");
+ QV_INFO("[C] : Verifying ML-DSA-65 signature...\n");
 
  int result =
  OQS_SIG_verify(
@@ -799,7 +805,7 @@ int quantumvault_mldsa_verify_data(
 
  if (result == OQS_SUCCESS) {
 
- printf("[C] : ML-DSA-65 signature verification successful\n");
+ QV_INFO("[C] : ML-DSA-65 signature verification successful\n");
 
  OQS_MEM_secure_free(
  public_key,
@@ -810,7 +816,7 @@ int quantumvault_mldsa_verify_data(
  return 1;
  }
 
- printf("[C] ERROR: ML-DSA-65 signature verification failed\n");
+ QV_ERROR("ML-DSA-65 signature verification failed\n");
 
  OQS_MEM_secure_free(
  public_key,
@@ -858,21 +864,21 @@ int quantumvault_mlkem_generate_keys(
  size_t secret_key_len)
 {
  if (!public_key || !secret_key) {
- printf("[C] ERROR: Invalid ML-KEM key buffers\n");
+ QV_ERROR("Invalid ML-KEM key buffers\n");
  return 0;
  }
 
  OQS_KEM *kem = OQS_KEM_new("ML-KEM-768");
 
  if (!kem) {
- printf("[C] ERROR: Failed to initialize ML-KEM-768\n");
+ QV_ERROR("Failed to initialize ML-KEM-768\n");
  return 0;
  }
 
  if (public_key_len != kem->length_public_key ||
  secret_key_len != kem->length_secret_key) {
 
- printf("[C] ERROR: Invalid ML-KEM key sizes\n");
+ QV_ERROR("Invalid ML-KEM key sizes\n");
 
  OQS_KEM_free(kem);
  return 0;
@@ -882,7 +888,7 @@ int quantumvault_mlkem_generate_keys(
  OQS_MEM_malloc(kem->length_secret_key);
 
  if (!internal_secret) {
- printf("[C] ERROR: Secret-key allocation failed\n");
+ QV_ERROR("Secret-key allocation failed\n");
 
  OQS_KEM_free(kem);
  return 0;
@@ -894,7 +900,7 @@ int quantumvault_mlkem_generate_keys(
  kem->length_secret_key);
 
  if (!locked) {
- printf("[C] ERROR: Failed to lock ML-KEM secret key\n");
+ QV_ERROR("Failed to lock ML-KEM secret key\n");
 
  OQS_MEM_secure_free(
  internal_secret,
@@ -904,7 +910,7 @@ int quantumvault_mlkem_generate_keys(
  return 0;
  }
 
- printf("[C] : Generating ML-KEM-768 keypair...\n");
+ QV_INFO("[C] : Generating ML-KEM-768 keypair...\n");
 
  int result =
  OQS_KEM_keypair(
@@ -918,9 +924,9 @@ int quantumvault_mlkem_generate_keys(
  internal_secret,
  kem->length_secret_key);
 
- printf("[C] : ML-KEM-768 keypair generated successfully\n");
+ QV_INFO("[C] : ML-KEM-768 keypair generated successfully\n");
  } else {
- printf("[C] ERROR: ML-KEM-768 keypair generation failed\n");
+ QV_ERROR("ML-KEM-768 keypair generation failed\n");
  }
 
  qv_secure_wipe_unlock(
@@ -950,14 +956,14 @@ int quantumvault_mlkem_encapsulate(
  size_t shared_secret_len)
 {
  if (!public_key || !ciphertext || !shared_secret) {
- printf("[C] ERROR: Invalid ML-KEM encapsulation buffers\n");
+ QV_ERROR("Invalid ML-KEM encapsulation buffers\n");
  return 0;
  }
 
  OQS_KEM *kem = OQS_KEM_new("ML-KEM-768");
 
  if (!kem) {
- printf("[C] ERROR: Failed to initialize ML-KEM-768\n");
+ QV_ERROR("Failed to initialize ML-KEM-768\n");
  return 0;
  }
 
@@ -965,7 +971,7 @@ int quantumvault_mlkem_encapsulate(
  ciphertext_len != kem->length_ciphertext ||
  shared_secret_len != kem->length_shared_secret) {
 
- printf("[C] ERROR: Invalid ML-KEM encapsulation sizes\n");
+ QV_ERROR("Invalid ML-KEM encapsulation sizes\n");
 
  OQS_KEM_free(kem);
  return 0;
@@ -975,7 +981,7 @@ int quantumvault_mlkem_encapsulate(
  OQS_MEM_malloc(kem->length_shared_secret);
 
  if (!internal_shared_secret) {
- printf("[C] ERROR: Shared-secret allocation failed\n");
+ QV_ERROR("Shared-secret allocation failed\n");
 
  OQS_KEM_free(kem);
  return 0;
@@ -987,7 +993,7 @@ int quantumvault_mlkem_encapsulate(
  kem->length_shared_secret);
 
  if (!locked) {
- printf("[C] ERROR: Failed to lock shared secret\n");
+ QV_ERROR("Failed to lock shared secret\n");
 
  OQS_MEM_secure_free(
  internal_shared_secret,
@@ -997,7 +1003,7 @@ int quantumvault_mlkem_encapsulate(
  return 0;
  }
 
- printf("[C] : Encapsulating ML-KEM-768 shared secret...\n");
+ QV_INFO("[C] : Encapsulating ML-KEM-768 shared secret...\n");
 
  int result =
  OQS_KEM_encaps(
@@ -1012,9 +1018,9 @@ int quantumvault_mlkem_encapsulate(
  internal_shared_secret,
  kem->length_shared_secret);
 
- printf("[C] : ML-KEM encapsulation successful\n");
+ QV_INFO("[C] : ML-KEM encapsulation successful\n");
  } else {
- printf("[C] ERROR: ML-KEM encapsulation failed\n");
+ QV_ERROR("ML-KEM encapsulation failed\n");
  }
 
  qv_secure_wipe_unlock(
@@ -1044,14 +1050,14 @@ int quantumvault_mlkem_decapsulate(
  size_t shared_secret_len)
 {
  if (!secret_key || !ciphertext || !shared_secret) {
- printf("[C] ERROR: Invalid ML-KEM decapsulation buffers\n");
+ QV_ERROR("Invalid ML-KEM decapsulation buffers\n");
  return 0;
  }
 
  OQS_KEM *kem = OQS_KEM_new("ML-KEM-768");
 
  if (!kem) {
- printf("[C] ERROR: Failed to initialize ML-KEM-768\n");
+ QV_ERROR("Failed to initialize ML-KEM-768\n");
  return 0;
  }
 
@@ -1059,7 +1065,7 @@ int quantumvault_mlkem_decapsulate(
  ciphertext_len != kem->length_ciphertext ||
  shared_secret_len != kem->length_shared_secret) {
 
- printf("[C] ERROR: Invalid ML-KEM decapsulation sizes\n");
+ QV_ERROR("Invalid ML-KEM decapsulation sizes\n");
 
  OQS_KEM_free(kem);
  return 0;
@@ -1072,7 +1078,7 @@ int quantumvault_mlkem_decapsulate(
  OQS_MEM_malloc(kem->length_shared_secret);
 
  if (!internal_secret_key || !internal_shared_secret) {
- printf("[C] ERROR: Decapsulation allocation failed\n");
+ QV_ERROR("Decapsulation allocation failed\n");
 
  if (internal_secret_key) {
  OQS_MEM_secure_free(
@@ -1106,7 +1112,7 @@ int quantumvault_mlkem_decapsulate(
  kem->length_shared_secret);
 
  if (!secret_locked || !shared_locked) {
- printf("[C] ERROR: Failed to lock decapsulation buffers\n");
+ QV_ERROR("Failed to lock decapsulation buffers\n");
 
  qv_secure_wipe_unlock(
  internal_secret_key,
@@ -1122,7 +1128,7 @@ int quantumvault_mlkem_decapsulate(
  return 0;
  }
 
- printf("[C] : Decapsulating ML-KEM-768 shared secret...\n");
+ QV_INFO("[C] : Decapsulating ML-KEM-768 shared secret...\n");
 
  int result =
  OQS_KEM_decaps(
@@ -1137,9 +1143,9 @@ int quantumvault_mlkem_decapsulate(
  internal_shared_secret,
  kem->length_shared_secret);
 
- printf("[C] : ML-KEM decapsulation successful\n");
+ QV_INFO("[C] : ML-KEM decapsulation successful\n");
  } else {
- printf("[C] ERROR: ML-KEM decapsulation failed\n");
+ QV_ERROR("ML-KEM decapsulation failed\n");
  }
 
  qv_secure_wipe_unlock(
@@ -1171,21 +1177,21 @@ int quantumvault_mldsa_generate_keys(
  size_t secret_key_len)
 {
  if (!public_key || !secret_key) {
- printf("[C] ERROR: Invalid ML-DSA key buffers\n");
+ QV_ERROR("Invalid ML-DSA key buffers\n");
  return 0;
  }
 
  OQS_SIG *sig = OQS_SIG_new("ML-DSA-65");
 
  if (!sig) {
- printf("[C] ERROR: Failed to initialize ML-DSA-65\n");
+ QV_ERROR("Failed to initialize ML-DSA-65\n");
  return 0;
  }
 
  if (public_key_len != sig->length_public_key ||
  secret_key_len != sig->length_secret_key) {
 
- printf("[C] ERROR: Invalid ML-DSA key sizes\n");
+ QV_ERROR("Invalid ML-DSA key sizes\n");
 
  OQS_SIG_free(sig);
  return 0;
@@ -1195,7 +1201,7 @@ int quantumvault_mldsa_generate_keys(
  OQS_MEM_malloc(sig->length_secret_key);
 
  if (!internal_secret) {
- printf("[C] ERROR: ML-DSA secret allocation failed\n");
+ QV_ERROR("ML-DSA secret allocation failed\n");
 
  OQS_SIG_free(sig);
  return 0;
@@ -1207,7 +1213,7 @@ int quantumvault_mldsa_generate_keys(
  sig->length_secret_key);
 
  if (!locked) {
- printf("[C] ERROR: Failed to lock ML-DSA secret key\n");
+ QV_ERROR("Failed to lock ML-DSA secret key\n");
 
  OQS_MEM_secure_free(
  internal_secret,
@@ -1217,7 +1223,7 @@ int quantumvault_mldsa_generate_keys(
  return 0;
  }
 
- printf("[C] : Generating ML-DSA-65 keypair...\n");
+ QV_INFO("[C] : Generating ML-DSA-65 keypair...\n");
 
  int result =
  OQS_SIG_keypair(
@@ -1231,9 +1237,9 @@ int quantumvault_mldsa_generate_keys(
  internal_secret,
  sig->length_secret_key);
 
- printf("[C] : ML-DSA-65 keypair generated successfully\n");
+ QV_INFO("[C] : ML-DSA-65 keypair generated successfully\n");
  } else {
- printf("[C] ERROR: ML-DSA-65 keypair generation failed\n");
+ QV_ERROR("ML-DSA-65 keypair generation failed\n");
  }
 
  qv_secure_wipe_unlock(
@@ -1264,19 +1270,19 @@ int quantumvault_mldsa_sign_with_key(
  size_t *signature_len)
 {
  if (!data || !secret_key || !signature || !signature_len) {
- printf("[C] ERROR: Invalid ML-DSA signing arguments\n");
+ QV_ERROR("Invalid ML-DSA signing arguments\n");
  return 0;
  }
 
  OQS_SIG *sig = OQS_SIG_new("ML-DSA-65");
 
  if (!sig) {
- printf("[C] ERROR: Failed to initialize ML-DSA-65\n");
+ QV_ERROR("Failed to initialize ML-DSA-65\n");
  return 0;
  }
 
  if (secret_key_len != sig->length_secret_key) {
- printf("[C] ERROR: Invalid ML-DSA secret-key size\n");
+ QV_ERROR("Invalid ML-DSA secret-key size\n");
 
  OQS_SIG_free(sig);
  return 0;
@@ -1286,7 +1292,7 @@ int quantumvault_mldsa_sign_with_key(
  OQS_MEM_malloc(sig->length_secret_key);
 
  if (!internal_secret) {
- printf("[C] ERROR: Secret-key allocation failed\n");
+ QV_ERROR("Secret-key allocation failed\n");
 
  OQS_SIG_free(sig);
  return 0;
@@ -1303,7 +1309,7 @@ int quantumvault_mldsa_sign_with_key(
  sig->length_secret_key);
 
  if (!locked) {
- printf("[C] ERROR: Failed to lock signing key\n");
+ QV_ERROR("Failed to lock signing key\n");
 
  OQS_MEM_secure_free(
  internal_secret,
@@ -1313,7 +1319,7 @@ int quantumvault_mldsa_sign_with_key(
  return 0;
  }
 
- printf("[C] : Signing data with persistent ML-DSA-65 key...\n");
+ QV_INFO("[C] : Signing data with persistent ML-DSA-65 key...\n");
 
  int result =
  OQS_SIG_sign(
@@ -1325,11 +1331,11 @@ int quantumvault_mldsa_sign_with_key(
  internal_secret) == OQS_SUCCESS;
 
  if (result) {
- printf("[C] : ML-DSA-65 signing successful\n");
- printf("[C] : Signature size: %zu bytes\n",
+ QV_INFO("[C] : ML-DSA-65 signing successful\n");
+ QV_INFO("[C] : Signature size: %zu bytes\n",
  *signature_len);
  } else {
- printf("[C] ERROR: ML-DSA-65 signing failed\n");
+ QV_ERROR("ML-DSA-65 signing failed\n");
  }
 
  qv_secure_wipe_unlock(
@@ -1355,25 +1361,25 @@ int quantumvault_mldsa_verify_with_key(
  size_t signature_len)
 {
  if (!data || !public_key || !signature || signature_len == 0) {
- printf("[C] ERROR: Invalid ML-DSA verification arguments\n");
+ QV_ERROR("Invalid ML-DSA verification arguments\n");
  return 0;
  }
 
  OQS_SIG *sig = OQS_SIG_new("ML-DSA-65");
 
  if (!sig) {
- printf("[C] ERROR: Failed to initialize ML-DSA-65\n");
+ QV_ERROR("Failed to initialize ML-DSA-65\n");
  return 0;
  }
 
  if (public_key_len != sig->length_public_key) {
- printf("[C] ERROR: Invalid ML-DSA public-key size\n");
+ QV_ERROR("Invalid ML-DSA public-key size\n");
 
  OQS_SIG_free(sig);
  return 0;
  }
 
- printf("[C] : Verifying ML-DSA-65 signature...\n");
+ QV_INFO("[C] : Verifying ML-DSA-65 signature...\n");
 
  int result =
  OQS_SIG_verify(
@@ -1385,9 +1391,9 @@ int quantumvault_mldsa_verify_with_key(
  public_key) == OQS_SUCCESS;
 
  if (result) {
- printf("[C] : ML-DSA-65 signature verification successful\n");
+ QV_INFO("[C] : ML-DSA-65 signature verification successful\n");
  } else {
- printf("[C] ERROR: ML-DSA-65 signature verification failed\n");
+ QV_ERROR("ML-DSA-65 signature verification failed\n");
  }
 
  OQS_SIG_free(sig);

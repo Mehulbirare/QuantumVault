@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use std::{
     ffi::OsStr,
     fs::{self, OpenOptions},
-    io::{self, Read, Write},
+    io::{Read, Write},
     os::unix::fs::PermissionsExt,
     path::PathBuf,
     time::{Duration, SystemTime},
@@ -75,20 +75,6 @@ unsafe extern "C" {
     fn quantumvault_ffi_test() -> i32;
 
     fn quantumvault_mldsa_test() -> i32;
-
-    fn quantumvault_mldsa_sign_data(
-        data: *const u8,
-        data_len: usize,
-        signature: *mut u8,
-        signature_len: *mut usize,
-    ) -> i32;
-
-    fn quantumvault_mldsa_verify_data(
-        data: *const u8,
-        data_len: usize,
-        signature: *const u8,
-        signature_len: usize,
-    ) -> i32;
 
     fn quantumvault_mlkem_generate_keys(
         public_key: *mut u8,
@@ -254,9 +240,8 @@ impl SecureBytes {
             unsafe { libc::mlock(data.as_mut_ptr() as *const libc::c_void, data.len()) == 0 };
 
         if locked {
-            println!("[Rust] : Sensitive Rust memory locked with mlock()");
         } else {
-            println!("[Rust] WARNING: Rust mlock() unavailable; continuing with memory wiping");
+            println!("WARNING: Rust mlock() unavailable; continuing with memory wiping");
         }
 
         Ok(Self { data, locked })
@@ -267,9 +252,8 @@ impl SecureBytes {
             unsafe { libc::mlock(data.as_mut_ptr() as *const libc::c_void, data.len()) == 0 };
 
         if locked {
-            println!("[Rust] : Sensitive Rust memory locked with mlock()");
         } else {
-            println!("[Rust] WARNING: Rust mlock() unavailable; continuing with memory wiping");
+            println!("WARNING: Rust mlock() unavailable; continuing with memory wiping");
         }
 
         Ok(Self { data, locked })
@@ -308,8 +292,6 @@ impl Drop for SecureBytes {
                 );
             }
         }
-
-        println!("[Rust] : Sensitive memory wiped and released");
     }
 }
 
@@ -344,8 +326,6 @@ impl QuantumVaultFS {
      */
 
     fn encrypt_data(&self, plaintext: &[u8]) -> Result<Vec<u8>, ()> {
-        println!("[Rust] : Starting hybrid encryption");
-
         let mut kem_ciphertext = vec![0u8; MLKEM_CIPHERTEXT_SIZE];
 
         let mut shared_secret = SecureBytes::new(MLKEM_SHARED_SECRET_SIZE)?;
@@ -362,28 +342,23 @@ impl QuantumVaultFS {
         };
 
         if result != 1 {
-            println!("[Rust] ERROR: ML-KEM encapsulation failed");
+            println!("ERROR: ML-KEM encapsulation failed");
 
             return Err(());
         }
 
-        println!("[Rust] : ML-KEM-768 encapsulation successful");
+        let key =
+            Key::<Aes256Gcm>::try_from(shared_secret.as_slice()).expect("invalid AES key length");
 
-        let key = Key::<Aes256Gcm>::from_slice(shared_secret.as_slice());
-
-        let cipher = Aes256Gcm::new(key);
+        let cipher = Aes256Gcm::new(&key);
 
         let mut nonce_bytes = [0u8; AES_NONCE_SIZE];
 
         rand::rng().fill_bytes(&mut nonce_bytes);
 
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = Nonce::try_from(nonce_bytes.as_slice()).expect("invalid AES nonce length");
 
-        let ciphertext = cipher.encrypt(nonce, plaintext).map_err(|_| ())?;
-
-        println!("[Rust] : Fresh AES-GCM nonce generated");
-
-        println!("[Rust] : AES-256-GCM encryption successful");
+        let ciphertext = cipher.encrypt(&nonce, plaintext).map_err(|_| ())?;
 
         let mut output = Vec::with_capacity(DATA_HEADER_SIZE + ciphertext.len());
 
@@ -397,7 +372,7 @@ impl QuantumVaultFS {
 
         output.extend_from_slice(&ciphertext);
 
-        println!("[Rust] : Hybrid encrypted file format created");
+        println!("Hybrid encrypted file format created");
 
         Ok(output)
     }
@@ -410,19 +385,19 @@ impl QuantumVaultFS {
 
     fn decrypt_data(&self, encrypted_data: &[u8]) -> Result<Vec<u8>, ()> {
         if encrypted_data.len() < DATA_HEADER_SIZE + AES_TAG_SIZE {
-            println!("[Rust] ERROR: Encrypted file is too small");
+            println!("ERROR: Encrypted file is too small");
 
             return Err(());
         }
 
         if &encrypted_data[..4] != DATA_MAGIC {
-            println!("[Rust] ERROR: Invalid encrypted-file magic");
+            println!("ERROR: Invalid encrypted-file magic");
 
             return Err(());
         }
 
         if encrypted_data[4] != DATA_VERSION {
-            println!("[Rust] ERROR: Unsupported encrypted-file version");
+            println!("ERROR: Unsupported encrypted-file version");
 
             return Err(());
         }
@@ -443,8 +418,6 @@ impl QuantumVaultFS {
 
         let ciphertext = &encrypted_data[ciphertext_start..];
 
-        println!("[Rust] : Decapsulating ML-KEM-768 key");
-
         let mut shared_secret = SecureBytes::new(MLKEM_SHARED_SECRET_SIZE)?;
 
         let result = unsafe {
@@ -459,22 +432,21 @@ impl QuantumVaultFS {
         };
 
         if result != 1 {
-            println!("[Rust] ERROR: ML-KEM decapsulation failed");
+            println!("ERROR: ML-KEM decapsulation failed");
 
             return Err(());
         }
 
-        println!("[Rust] : ML-KEM-768 decapsulation successful");
+        println!("ML-KEM-768 decapsulation successful");
 
-        let key = Key::<Aes256Gcm>::from_slice(shared_secret.as_slice());
+        let key =
+            Key::<Aes256Gcm>::try_from(shared_secret.as_slice()).expect("invalid AES key length");
 
-        let cipher = Aes256Gcm::new(key);
+        let cipher = Aes256Gcm::new(&key);
 
-        let nonce = Nonce::from_slice(nonce_bytes);
+        let nonce = Nonce::try_from(nonce_bytes).expect("invalid AES nonce length");
 
-        let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|_| ())?;
-
-        println!("[Rust] : AES-256-GCM authentication and decryption successful");
+        let plaintext = cipher.decrypt(&nonce, ciphertext).map_err(|_| ())?;
 
         Ok(plaintext)
     }
@@ -502,14 +474,12 @@ impl QuantumVaultFS {
         };
 
         if result != 1 || signature_len == 0 || signature_len > signature.len() {
-            println!("[Rust] ERROR: ML-DSA-65 signing failed");
+            println!("ERROR: ML-DSA-65 signing failed");
 
             return Err(());
         }
 
         signature.truncate(signature_len);
-
-        println!("[Rust] : ML-DSA-65 signature generated using persistent key");
 
         Ok(signature)
     }
@@ -533,12 +503,10 @@ impl QuantumVaultFS {
         };
 
         if result != 1 {
-            println!("[Rust] SECURITY ERROR: ML-DSA-65 verification failed");
+            println!("SECURITY ERROR: ML-DSA-65 verification failed");
 
             return Err(());
         }
-
-        println!("[Rust] : ML-DSA-65 signature verification successful");
 
         Ok(())
     }
@@ -555,15 +523,15 @@ impl QuantumVaultFS {
             .truncate(true)
             .open(&self.backing_file)
             .map_err(|error| {
-                println!("[Rust] ERROR: Cannot open backing file: {}", error);
+                println!("ERROR: Cannot open backing file: {}", error);
             })?;
 
         file.write_all(data).map_err(|error| {
-            println!("[Rust] ERROR: Backing write failed: {}", error);
+            println!("ERROR: Backing write failed: {}", error);
         })?;
 
         file.flush().map_err(|error| {
-            println!("[Rust] ERROR: Backing flush failed: {}", error);
+            println!("ERROR: Backing flush failed: {}", error);
         })?;
 
         Ok(())
@@ -582,7 +550,7 @@ impl QuantumVaultFS {
             .open(&self.backing_file)
             .map(|_| ())
             .map_err(|error| {
-                println!("[Rust] ERROR: Cannot clear backing file: {}", error);
+                println!("ERROR: Cannot clear backing file: {}", error);
             })
     }
 }
@@ -685,7 +653,7 @@ impl Filesystem for QuantumVaultFS {
 
                 let _ = fs::remove_file(SIGNATURE_FILE);
 
-                println!("[Rust] : Signature evidence cleared");
+                println!("Signature evidence cleared");
             }
         }
 
@@ -731,7 +699,7 @@ impl Filesystem for QuantumVaultFS {
             Ok(data) => data,
 
             Err(_) => {
-                println!("[Rust] SECURITY ERROR: Decryption/authentication failed");
+                println!("SECURITY ERROR: Decryption/authentication failed");
 
                 reply.error(EIO);
                 return;
@@ -748,28 +716,28 @@ impl Filesystem for QuantumVaultFS {
             .and_then(|mut file| file.read_to_end(&mut evidence))
             .is_err()
         {
-            println!("[Rust] SECURITY ERROR: Signature evidence missing");
+            println!("SECURITY ERROR: Signature evidence missing");
 
             reply.error(EIO);
             return;
         }
 
         if evidence.len() < SIGNATURE_HEADER_SIZE {
-            println!("[Rust] SECURITY ERROR: Signature evidence too small");
+            println!("SECURITY ERROR: Signature evidence too small");
 
             reply.error(EIO);
             return;
         }
 
         if &evidence[..4] != SIGNATURE_MAGIC {
-            println!("[Rust] SECURITY ERROR: Invalid signature magic");
+            println!("SECURITY ERROR: Invalid signature magic");
 
             reply.error(EIO);
             return;
         }
 
         if evidence[4] != SIGNATURE_VERSION {
-            println!("[Rust] SECURITY ERROR: Unsupported signature version");
+            println!("SECURITY ERROR: Unsupported signature version");
 
             reply.error(EIO);
             return;
@@ -782,7 +750,7 @@ impl Filesystem for QuantumVaultFS {
         let expected_length = u64::from_le_bytes(length_bytes);
 
         if expected_length != plaintext.len() as u64 {
-            println!("[Rust] SECURITY ERROR: Plaintext length mismatch");
+            println!("SECURITY ERROR: Plaintext length mismatch");
 
             reply.error(EIO);
             return;
@@ -791,7 +759,7 @@ impl Filesystem for QuantumVaultFS {
         let signature = &evidence[SIGNATURE_HEADER_SIZE..];
 
         if signature.len() != MLDSA_SIGNATURE_SIZE {
-            println!("[Rust] SECURITY ERROR: Invalid ML-DSA signature size");
+            println!("SECURITY ERROR: Invalid ML-DSA signature size");
 
             reply.error(EIO);
             return;
@@ -804,13 +772,11 @@ impl Filesystem for QuantumVaultFS {
          */
 
         if self.verify_signature(&plaintext, signature).is_err() {
-            println!("[Rust] SECURITY ERROR: Tampering detected");
+            println!("SECURITY ERROR: Tampering detected");
 
             reply.error(EIO);
             return;
         }
-
-        println!("[Rust] : Plaintext integrity verified");
 
         let start = offset.max(0) as usize;
 
@@ -846,11 +812,7 @@ impl Filesystem for QuantumVaultFS {
             return;
         }
 
-        println!("[Rust] FUSE write(): {} plaintext bytes", data.len());
-
-        println!("[Rust] : Using persistent ML-KEM-768 and ML-DSA-65 keys");
-
-        println!("[Rust] Write offset: {}", offset);
+        println!("Write offset: {}", offset);
 
         /*
          * :
@@ -889,7 +851,7 @@ impl Filesystem for QuantumVaultFS {
             Ok(data) => data,
 
             Err(_) => {
-                println!("[Rust] ERROR: Hybrid encryption failed");
+                println!("ERROR: Hybrid encryption failed");
 
                 reply.error(EIO);
                 return;
@@ -901,7 +863,7 @@ impl Filesystem for QuantumVaultFS {
          */
 
         if let Err(error) = self.write_backing_file(&encrypted_data) {
-            println!("[Rust] ERROR: Encrypted backing write failed: {:?}", error);
+            println!("ERROR: Encrypted backing write failed: {:?}", error);
 
             reply.error(EIO);
             return;
@@ -926,7 +888,7 @@ impl Filesystem for QuantumVaultFS {
             });
 
         if let Err(error) = signature_result {
-            println!("[Rust] ERROR: Signature evidence write failed: {}", error);
+            println!("ERROR: Signature evidence write failed: {}", error);
 
             let _ = self.clear_backing_file();
 
@@ -934,11 +896,7 @@ impl Filesystem for QuantumVaultFS {
             return;
         }
 
-        println!("[Rust] : Encrypted ciphertext stored on backing file");
-
-        println!("[Rust] : ML-DSA-65 signature evidence stored");
-
-        println!("[Rust] : Plaintext never written to backing storage");
+        println!("ML-DSA-65 signature evidence stored");
 
         reply.written(data.len() as u32);
     }
@@ -1017,7 +975,10 @@ fn derive_password_key(password: &str) -> [u8; AES_KEY_SIZE] {
 
 fn generate_pq_key_material() -> Result<VaultKeys, ()> {
     println!();
-    println!("[Rust] : Generating persistent PQ keypairs...");
+    println!("──────────────────────────────────────────────");
+    println!("              KEY GENERATION");
+    println!("──────────────────────────────────────────────");
+    println!();
 
     let mut mlkem_public = vec![0u8; MLKEM_PUBLIC_KEY_SIZE];
 
@@ -1033,12 +994,12 @@ fn generate_pq_key_material() -> Result<VaultKeys, ()> {
     };
 
     if result != 1 {
-        println!("[Rust] ERROR: ML-KEM-768 key generation failed");
+        println!("ERROR: ML-KEM-768 key generation failed");
 
         return Err(());
     }
 
-    println!("[Rust] : ML-KEM-768 persistent keypair generated");
+    println!("  ML-KEM-768 keypair        ✓ GENERATED");
 
     let mut mldsa_public = vec![0u8; MLDSA_PUBLIC_KEY_SIZE];
 
@@ -1054,12 +1015,12 @@ fn generate_pq_key_material() -> Result<VaultKeys, ()> {
     };
 
     if result != 1 {
-        println!("[Rust] ERROR: ML-DSA-65 key generation failed");
+        println!("ERROR: ML-DSA-65 key generation failed");
 
         return Err(());
     }
 
-    println!("[Rust] : ML-DSA-65 persistent keypair generated");
+    println!("  ML-DSA-65 keypair         ✓ GENERATED");
 
     Ok(VaultKeys {
         mlkem_public,
@@ -1096,23 +1057,29 @@ fn serialize_key_material(keys: &VaultKeys) -> Vec<u8> {
  */
 
 fn save_encrypted_key_bundle(keys: &VaultKeys, password: &str) -> Result<(), ()> {
-    println!("[Rust] : Encrypting persistent PQ key bundle...");
+    println!();
+    println!("──────────────────────────────────────────────");
+    println!("              KEY PROTECTION");
+    println!("──────────────────────────────────────────────");
+    println!();
 
     let material = serialize_key_material(keys);
 
     let password_key = derive_password_key(password);
 
-    let key = Key::<Aes256Gcm>::from_slice(&password_key);
+    let key = Key::<Aes256Gcm>::try_from(password_key.as_slice()).expect("invalid AES key length");
 
-    let cipher = Aes256Gcm::new(key);
+    let cipher = Aes256Gcm::new(&key);
 
     let mut nonce_bytes = [0u8; AES_NONCE_SIZE];
 
     rand::rng().fill_bytes(&mut nonce_bytes);
 
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = Nonce::try_from(nonce_bytes.as_slice()).expect("invalid AES nonce length");
 
-    let encrypted = cipher.encrypt(nonce, material.as_slice()).map_err(|_| ())?;
+    let encrypted = cipher
+        .encrypt(&nonce, material.as_slice())
+        .map_err(|_| ())?;
 
     let mut bundle = Vec::with_capacity(KEY_BUNDLE_HEADER_SIZE + encrypted.len());
 
@@ -1130,7 +1097,7 @@ fn save_encrypted_key_bundle(keys: &VaultKeys, password: &str) -> Result<(), ()>
         .truncate(true)
         .open(KEY_BUNDLE_FILE)
         .map_err(|error| {
-            println!("[Rust] ERROR: Cannot create key bundle: {}", error);
+            println!("ERROR: Cannot create key bundle: {}", error);
         })?;
 
     file.write_all(&bundle).map_err(|_| ())?;
@@ -1138,17 +1105,12 @@ fn save_encrypted_key_bundle(keys: &VaultKeys, password: &str) -> Result<(), ()>
     file.flush().map_err(|_| ())?;
 
     fs::set_permissions(KEY_BUNDLE_FILE, fs::Permissions::from_mode(0o600)).map_err(|error| {
-        println!(
-            "[Rust] ERROR: Failed to set key bundle permissions: {}",
-            error
-        );
+        println!("ERROR: Failed to set key bundle permissions: {}", error);
     })?;
 
-    println!("[Rust] : Encrypted PQ key bundle saved");
-
-    println!("[Rust] : Private keys are NOT stored plaintext");
-
-    println!("[Rust] : Key bundle permissions set to 0600");
+    println!("  PQ key bundle          ✓ ENCRYPTED");
+    println!("  Private keys           ✓ PROTECTED");
+    println!("  File permissions       ✓ SECURED (0600)");
 
     Ok(())
 }
@@ -1160,26 +1122,26 @@ fn save_encrypted_key_bundle(keys: &VaultKeys, password: &str) -> Result<(), ()>
  */
 
 fn load_encrypted_key_bundle(password: &str) -> Result<VaultKeys, ()> {
-    println!("[Rust] : Loading encrypted PQ key bundle...");
+    println!("Loading encrypted PQ key bundle...");
 
     let bundle = fs::read(KEY_BUNDLE_FILE).map_err(|error| {
-        println!("[Rust] ERROR: Cannot read key bundle: {}", error);
+        println!("ERROR: Cannot read key bundle: {}", error);
     })?;
 
     if bundle.len() < KEY_BUNDLE_HEADER_SIZE {
-        println!("[Rust] ERROR: Key bundle too small");
+        println!("ERROR: Key bundle too small");
 
         return Err(());
     }
 
     if &bundle[..4] != KEY_BUNDLE_MAGIC {
-        println!("[Rust] ERROR: Invalid key bundle magic");
+        println!("ERROR: Invalid key bundle magic");
 
         return Err(());
     }
 
     if bundle[4] != KEY_BUNDLE_VERSION {
-        println!("[Rust] ERROR: Unsupported key bundle version");
+        println!("ERROR: Unsupported key bundle version");
 
         return Err(());
     }
@@ -1193,25 +1155,25 @@ fn load_encrypted_key_bundle(password: &str) -> Result<VaultKeys, ()> {
     let ciphertext = &bundle[nonce_end..];
 
     if ciphertext.len() < AES_TAG_SIZE {
-        println!("[Rust] ERROR: Encrypted key bundle ciphertext too small");
+        println!("ERROR: Encrypted key bundle ciphertext too small");
 
         return Err(());
     }
 
     let password_key = derive_password_key(password);
 
-    let key = Key::<Aes256Gcm>::from_slice(&password_key);
+    let key = Key::<Aes256Gcm>::try_from(password_key.as_slice()).expect("invalid AES key length");
 
-    let cipher = Aes256Gcm::new(key);
+    let cipher = Aes256Gcm::new(&key);
 
-    let nonce = Nonce::from_slice(nonce_bytes);
+    let nonce = Nonce::try_from(nonce_bytes).expect("invalid AES nonce length");
 
-    let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|_| {
-        println!("[Rust] ERROR: Password authentication/key-bundle decryption failed");
+    let plaintext = cipher.decrypt(&nonce, ciphertext).map_err(|_| {
+        println!("ERROR: Password authentication/key-bundle decryption failed");
     })?;
 
     if plaintext.len() != KEY_MATERIAL_SIZE {
-        println!("[Rust] ERROR: Invalid decrypted key material size");
+        println!("ERROR: Invalid decrypted key material size");
 
         return Err(());
     }
@@ -1242,11 +1204,11 @@ fn load_encrypted_key_bundle(password: &str) -> Result<VaultKeys, ()> {
         .as_mut_slice()
         .copy_from_slice(&material.as_slice()[cursor..cursor + MLDSA_SECRET_KEY_SIZE]);
 
-    println!("[Rust] : Encrypted PQ key bundle decrypted successfully");
+    println!("Encrypted PQ key bundle decrypted successfully");
 
-    println!("[Rust] : ML-KEM-768 private key loaded into protected memory");
+    println!("ML-KEM-768 private key loaded into protected memory");
 
-    println!("[Rust] : ML-DSA-65 private key loaded into protected memory");
+    println!("ML-DSA-65 private key loaded into protected memory");
 
     Ok(VaultKeys {
         mlkem_public,
@@ -1273,7 +1235,7 @@ fn initialize_vault() -> Result<[u8; 32], ()> {
     let password = read_password().map_err(|_| ())?;
 
     if password.len() < 8 {
-        println!("[Rust] ERROR: Password must contain at least 8 characters");
+        println!("ERROR: Password must contain at least 8 characters");
 
         return Err(());
     }
@@ -1283,7 +1245,7 @@ fn initialize_vault() -> Result<[u8; 32], ()> {
     let confirmation = read_password().map_err(|_| ())?;
 
     if password != confirmation {
-        println!("[Rust] ERROR: Password confirmation failed");
+        println!("ERROR: Password confirmation failed");
 
         return Err(());
     }
@@ -1309,11 +1271,11 @@ fn initialize_vault() -> Result<[u8; 32], ()> {
     let _ = fs::remove_file(SIGNATURE_FILE);
 
     println!();
-    println!("[Rust] : Vault initialization successful");
+    println!("Vault initialization successful");
 
-    println!("[Rust] : Master password protects the PQ key bundle");
+    println!("Master password protects the PQ key bundle");
 
-    println!("[Rust] : Ready for secure mount");
+    println!("Ready for secure mount");
 
     /*
      * Return password-derived key only for
@@ -1333,26 +1295,43 @@ fn initialize_vault() -> Result<[u8; 32], ()> {
 
 fn unlock_vault() -> Result<VaultKeys, ()> {
     println!();
-    println!("==============================================");
-    println!(" QuantumVault Secure Unlock");
-    println!("==============================================");
+    println!("──────────────────────────────────────────────");
+    println!("         QuantumVault Secure Unlock");
+    println!("──────────────────────────────────────────────");
     println!();
 
     if !PathBuf::from(KEY_BUNDLE_FILE).exists() {
-        println!("[Rust] ERROR: QuantumVault is not initialized");
-
-        println!("[Rust] Run: quantumvault-fuse init <mountpoint>");
+        println!("ERROR: QuantumVault is not initialized");
+        println!("Run: quantumvault-fuse init <mountpoint>");
 
         return Err(());
     }
 
-    println!("Enter master password:");
+    println!("  Master password required");
+    println!();
+
+    print!("  Enter master password: ");
+    std::io::stdout().flush().map_err(|_| ())?;
 
     let password = read_password().map_err(|_| ())?;
 
+    println!();
+    println!("  Loading encrypted key bundle...");
+
     let keys = load_encrypted_key_bundle(&password)?;
 
-    println!("[Rust] : Vault unlocked successfully");
+    println!("  Key bundle decrypted       ✓");
+    println!("  ML-KEM-768 private key     ✓ LOADED");
+    println!("  ML-DSA-65 private key      ✓ LOADED");
+
+    println!();
+    println!("──────────────────────────────────────────────");
+    println!("        QuantumVault Secure Unlocked");
+    println!("──────────────────────────────────────────────");
+    println!();
+    println!("  ✓ QuantumVault unlocked successfully.");
+    println!("  ✓ Protected keys loaded into secure memory.");
+    println!();
 
     Ok(keys)
 }
@@ -1363,50 +1342,72 @@ fn unlock_vault() -> Result<VaultKeys, ()> {
  */
 
 fn status_vault() {
+    let key_bundle = PathBuf::from(KEY_BUNDLE_FILE).exists();
+    let encrypted_data = PathBuf::from(BACKING_FILE).exists();
+    let signature = PathBuf::from(SIGNATURE_FILE).exists();
+
     println!();
-    println!("==============================================");
-    println!(" QuantumVault Status");
-    println!("==============================================");
+    println!("╔══════════════════════════════════════════════╗");
+    println!("║                                              ║");
+    println!("║                                              ║");
+    println!("║         ◈ Q U A N T U M V A U L T ◈          ║");
+    println!("║                                              ║");
+    println!("║                                              ║");
+    println!("║    --- Quantum-Resistant Secure Vault ---    ║");
+    println!("║                                              ║");
+    println!("╚══════════════════════════════════════════════╝");
+    println!();
 
+    println!("──────────────────────────────────────────────");
+    println!("                VAULT STATUS");
+    println!("──────────────────────────────────────────────");
     println!(
-        "Key bundle: {}",
-        if PathBuf::from(KEY_BUNDLE_FILE,).exists() {
-            "PRESENT"
+        "  Vault              {}",
+        if key_bundle {
+            "● READY"
         } else {
-            "NOT INITIALIZED"
+            "● NOT INITIALIZED"
+        }
+    );
+    println!(
+        "  Encrypted Data     {}",
+        if encrypted_data {
+            "● PRESENT"
+        } else {
+            "○ EMPTY"
+        }
+    );
+    println!(
+        "  Signature Evidence {}",
+        if signature {
+            "● PRESENT"
+        } else {
+            "○ EMPTY"
         }
     );
 
-    println!(
-        "Encrypted data: {}",
-        if PathBuf::from(BACKING_FILE,).exists() {
-            "PRESENT"
-        } else {
-            "EMPTY"
-        }
-    );
+    println!();
+    println!("──────────────────────────────────────────────");
+    println!("                 CRYPTOGRAPHY");
+    println!("──────────────────────────────────────────────");
+    println!("  Key Encapsulation  ML-KEM-768");
+    println!("  Digital Signature  ML-DSA-65");
+    println!("  Encryption         AES-256-GCM");
+    println!("  Integrity          ML-DSA-65");
 
-    println!(
-        "Signature evidence: {}",
-        if PathBuf::from(SIGNATURE_FILE,).exists() {
-            "PRESENT"
-        } else {
-            "EMPTY"
-        }
-    );
+    println!();
+    println!("──────────────────────────────────────────────");
+    println!("                 KEY SECURITY");
+    println!("──────────────────────────────────────────────");
+    println!("  Key Bundle         AES-256-GCM encrypted");
+    println!("  Private Keys       ENCRYPTED ON DISK");
 
-    println!("ML-KEM: ML-KEM-768");
-
-    println!("ML-DSA: ML-DSA-65");
-
-    println!("File encryption: ML-KEM-768 + AES-256-GCM");
-
-    println!("File integrity: ML-DSA-65");
-
-    println!("Key bundle: AES-256-GCM encrypted");
-
-    println!("Private keys on disk: ENCRYPTED");
-
+    println!();
+    if key_bundle {
+        println!("✓ QuantumVault is ready.");
+    } else {
+        println!("! Initialize QuantumVault with: quantumvault-fuse init <mountpoint>");
+    }
     println!();
 }
 
@@ -1417,37 +1418,62 @@ fn status_vault() {
 
 fn run_crypto_test() -> bool {
     println!();
-    println!("==============================================");
-    println!(" QuantumVault Cryptographic Test");
-    println!("==============================================");
+    println!("──────────────────────────────────────────────");
+    println!("           CRYPTOGRAPHIC SELF-TEST");
+    println!("──────────────────────────────────────────────");
     println!();
 
-    println!("[Rust] : Testing ML-KEM-768...");
+    println!("  ML-KEM-768");
+    println!("  ├─ Key encapsulation test   ...");
 
     let kem = unsafe { quantumvault_ffi_test() };
 
     if kem != 1 {
-        println!("[Rust] ERROR: ML-KEM test failed");
+        println!("  └─ ✗ FAILED");
+        println!();
+        println!("──────────────────────────────────────────────");
+        println!("           SELF-TEST FAILED");
+        println!("──────────────────────────────────────────────");
+        println!();
 
         return false;
     }
 
-    println!("[Rust] : ML-KEM-768 test PASSED");
+    println!("  └─ ✓ PASSED");
+    println!();
 
-    println!("[Rust] : Testing ML-DSA-65...");
+    println!("  ML-DSA-65");
+    println!("  ├─ Digital signature test   ...");
 
     let dsa = unsafe { quantumvault_mldsa_test() };
 
     if dsa != 1 {
-        println!("[Rust] ERROR: ML-DSA test failed");
+        println!("  └─ ✗ FAILED");
+        println!();
+        println!("──────────────────────────────────────────────");
+        println!("           SELF-TEST FAILED");
+        println!("──────────────────────────────────────────────");
+        println!();
 
         return false;
     }
 
-    println!("[Rust] : ML-DSA-65 test PASSED");
-
+    println!("  └─ ✓ PASSED");
     println!();
-    println!("[Rust] : Cryptographic self-test PASSED");
+
+    println!("──────────────────────────────────────────────");
+    println!("             TEST SUMMARY");
+    println!("──────────────────────────────────────────────");
+    println!();
+    println!("  ML-KEM-768              ✓ PASSED");
+    println!("  ML-DSA-65               ✓ PASSED");
+    println!("  Cryptographic tests     ✓ PASSED");
+    println!();
+
+    println!("──────────────────────────────────────────────");
+    println!("        CRYPTOGRAPHY VERIFIED ✓");
+    println!("──────────────────────────────────────────────");
+    println!();
 
     true
 }
@@ -1459,28 +1485,28 @@ fn run_crypto_test() -> bool {
 
 fn mount_vault(mountpoint: String, keys: VaultKeys) {
     println!();
-    println!("==============================================");
-    println!(" QuantumVault Secure Filesystem");
-    println!("==============================================");
+    println!("──────────────────────────────────────────────");
+    println!("              SECURE VAULT MOUNT");
+    println!("──────────────────────────────────────────────");
+    println!();
 
-    println!("[Rust] Mounting at: {}", mountpoint);
+    println!("  Mountpoint          {}", mountpoint);
+    println!("  Key Management      ✓ PQ KEYS LOADED");
+    println!("  Encryption          ✓ ML-KEM-768 + AES-256-GCM");
+    println!("  Integrity           ✓ ML-DSA-65");
+    println!("  Memory Security     ✓ ENABLED");
+    println!("  Backing Storage     {}", BACKING_FILE);
+    println!("  Key Bundle          {}", KEY_BUNDLE_FILE);
 
-    println!("[Rust] : Persistent PQ keys loaded");
-
-    println!("[Rust] : ML-KEM-768 + AES-256-GCM enabled");
-
-    println!("[Rust] : ML-DSA-65 integrity verification enabled");
-
-    println!("[Rust] : Secure memory handling enabled");
-
-    println!("[Rust] Backing file: {}", BACKING_FILE);
-
-    println!("[Rust] Key bundle: {}", KEY_BUNDLE_FILE);
+    println!();
+    println!("──────────────────────────────────────────────");
+    println!("              QUANTUMVAULT READY");
+    println!("──────────────────────────────────────────────");
+    println!();
 
     fuser::mount2(
         QuantumVaultFS {
             backing_file: PathBuf::from(BACKING_FILE),
-
             keys,
         },
         mountpoint,
@@ -1499,35 +1525,64 @@ fn mount_vault(mountpoint: String, keys: VaultKeys) {
 
 fn print_usage() {
     println!();
-    println!("QuantumVault ");
+    println!("╔══════════════════════════════════════════════╗");
+    println!("║                                              ║");
+    println!("║         ◈ Q U A N T U M V A U L T ◈          ║");
+    println!("║                                              ║");
+    println!("║    --- Quantum-Resistant Secure Vault ---    ║");
+    println!("║                                              ║");
+    println!("╚══════════════════════════════════════════════╝");
     println!();
 
-    println!("Usage:");
-
-    println!(" quantumvault-fuse init <mountpoint>");
-
-    println!(" quantumvault-fuse <mountpoint>");
-
-    println!(" quantumvault-fuse status");
-
-    println!(" quantumvault-fuse test");
-
-    println!(" quantumvault-fuse help");
-
+    println!("──────────────────────────────────────────────");
+    println!("                  USAGE");
+    println!("──────────────────────────────────────────────");
     println!();
 
-    println!("Commands:");
+    println!("  quantumvault-fuse init <mountpoint>");
+    println!("      Initialize vault and generate PQ keys");
+    println!();
 
-    println!(" init <mountpoint> Initialize vault and generate PQ keys");
+    println!("  quantumvault-fuse <mountpoint>");
+    println!("      Unlock and mount an existing vault");
+    println!();
 
-    println!(" <mountpoint> Unlock and mount existing vault");
+    println!("  quantumvault-fuse status");
+    println!("      Display vault and cryptographic status");
+    println!();
 
-    println!(" status Show vault status");
+    println!("  quantumvault-fuse test");
+    println!("      Run ML-KEM-768 and ML-DSA-65 self-tests");
+    println!();
 
-    println!(" test Run ML-KEM/ML-DSA crypto tests");
+    println!("  quantumvault-fuse help");
+    println!("      Display this help information");
+    println!();
 
-    println!(" help Show this help");
+    println!("──────────────────────────────────────────────");
+    println!("                 COMMANDS");
+    println!("──────────────────────────────────────────────");
+    println!();
 
+    println!("  init <mountpoint>    Initialize secure vault");
+    println!("  <mountpoint>         Unlock and mount vault");
+    println!("  status               Show vault status");
+    println!("  test                 Run cryptographic self-tests");
+    println!("  help                 Show command reference");
+    println!();
+
+    println!("──────────────────────────────────────────────");
+    println!("             SECURITY ARCHITECTURE");
+    println!("──────────────────────────────────────────────");
+    println!();
+
+    println!("  Key Encapsulation     ML-KEM-768");
+    println!("  Digital Signature     ML-DSA-65");
+    println!("  File Encryption       AES-256-GCM");
+    println!("  Memory Protection     mlock + secure wipe");
+    println!();
+
+    println!("✓ QuantumVault — Quantum-Resistant Secure Storage");
     println!();
 }
 
@@ -1556,6 +1611,10 @@ fn main() {
 
     if args[1] == "test" {
         if !run_crypto_test() {
+            println!();
+            println!("ERROR: Cryptographic self-test failed");
+            println!();
+
             std::process::exit(1);
         }
 
@@ -1564,7 +1623,16 @@ fn main() {
 
     if args[1] == "init" {
         if args.len() != 3 {
-            println!("[Rust] ERROR: init requires a mountpoint");
+            println!();
+            println!("──────────────────────────────────────────────");
+            println!("              INVALID COMMAND");
+            println!("──────────────────────────────────────────────");
+            println!();
+            println!("  ERROR: init requires a mountpoint");
+            println!();
+            println!("  Example:");
+            println!("    quantumvault-fuse init /tmp/quantumvault-mnt");
+            println!();
 
             print_usage();
             return;
@@ -1572,34 +1640,41 @@ fn main() {
 
         let mountpoint = args[2].clone();
 
-        /*
-         * Initialize vault.
-         */
+        println!();
+        println!("──────────────────────────────────────────────");
+        println!("          QUANTUMVAULT INITIALIZATION");
+        println!("──────────────────────────────────────────────");
+        println!();
+        println!("  Mountpoint: {}", mountpoint);
+        println!();
 
         if initialize_vault().is_err() {
-            println!("[Rust] ERROR: Vault initialization failed");
+            println!();
+            println!("──────────────────────────────────────────────");
+            println!("          INITIALIZATION FAILED");
+            println!("──────────────────────────────────────────────");
+            println!();
+            println!("  ERROR: Vault initialization failed");
+            println!();
 
             return;
         }
 
-        /*
-         * Unlock again from the encrypted
-         * key bundle.
-         *
-         * This verifies the complete lifecycle:
-         *
-         * password
-         * ->
-         * encrypted bundle
-         * ->
-         * decrypted PQ keys
-         */
+        println!();
+        println!("  Vault initialization       ✓ COMPLETE");
+        println!();
 
         let keys = match unlock_vault() {
             Ok(keys) => keys,
 
             Err(_) => {
-                println!("[Rust] ERROR: Post-initialization unlock failed");
+                println!();
+                println!("──────────────────────────────────────────────");
+                println!("            UNLOCK FAILED");
+                println!("──────────────────────────────────────────────");
+                println!();
+                println!("  ERROR: Post-initialization unlock failed");
+                println!();
 
                 return;
             }
@@ -1617,7 +1692,14 @@ fn main() {
             Ok(keys) => keys,
 
             Err(_) => {
-                println!("[Rust] ERROR: QuantumVault unlock failed");
+                println!();
+                println!("──────────────────────────────────────────────");
+                println!("             VAULT ACCESS DENIED");
+                println!("──────────────────────────────────────────────");
+                println!();
+                println!("  ERROR: QuantumVault unlock failed");
+                println!("  Check your master password and try again.");
+                println!();
 
                 return;
             }
@@ -1627,6 +1709,14 @@ fn main() {
 
         return;
     }
+
+    println!();
+    println!("──────────────────────────────────────────────");
+    println!("              INVALID COMMAND");
+    println!("──────────────────────────────────────────────");
+    println!();
+    println!("  ERROR: Unknown command or invalid arguments.");
+    println!();
 
     print_usage();
 }
